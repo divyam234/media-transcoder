@@ -1,0 +1,553 @@
+openapi: 3.1.0
+info:
+  title: Go Media Transcoder Dynamic Playback API
+  version: 0.1.0
+  description: |
+    Dynamic HLS/DASH playback-origin API backed by direct FFmpeg libav* calls.
+    The service does not spawn ffmpeg/ffprobe processes at runtime and does not
+    expose static transcode-to-output endpoints.
+servers:
+  - url: http://localhost:8080
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+  /v1/capabilities:
+    get:
+      summary: Full server capability report
+      responses:
+        "200":
+          description: Capability report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitySet"
+  /v1/capabilities/runtime:
+    get:
+      summary: Runtime FFmpeg/libav capabilities discovered through cgo
+      responses:
+        "200":
+          description: Runtime libav capability report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeCapabilities"
+  /v1/capabilities/codecs:
+    get:
+      summary: Runtime codec and container lists
+      responses:
+        "200":
+          description: Codec/container capability lists
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  video_encoders:
+                    type: array
+                    items: { type: string }
+                  video_decoders:
+                    type: array
+                    items: { type: string }
+                  audio_encoders:
+                    type: array
+                    items: { type: string }
+                  audio_decoders:
+                    type: array
+                    items: { type: string }
+                  muxers:
+                    type: array
+                    items: { type: string }
+                  demuxers:
+                    type: array
+                    items: { type: string }
+  /v1/capabilities/hardware:
+    get:
+      summary: Hardware acceleration support matrix
+      responses:
+        "200":
+          description: Supported hardware accelerators and codec mapping
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hardware_accelerators:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/HardwareAccelerationType"
+                  video_codecs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/VideoCodec"
+                  matrix:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/HardwareCodecSupport"
+  /v1/metrics:
+    get:
+      summary: Runtime counters
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Metrics"
+  /v1/probe:
+    post:
+      summary: Probe an input file
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProbeRequest"
+      responses:
+        "200":
+          description: Media information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaInfo"
+  /v1/plan/device:
+    post:
+      summary: Build a transcode plan for a client/device capability set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DevicePlanRequest"
+      responses:
+        "200":
+          description: Planned encoder/container settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Plan"
+  /v1/playback/hls/sessions:
+    post:
+      summary: Create a dynamic HLS playback session
+      description: Creates a virtual playlist timeline. No media segment is generated until a segment URL is requested.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DynamicHLSSessionRequest"
+      responses:
+        "200":
+          description: Dynamic HLS session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DynamicHLSSessionResponse"
+  /v1/playback/hls/{id}/master.m3u8:
+    get:
+      summary: HLS master playlist
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+      responses:
+        "200":
+          description: HLS master playlist
+          content:
+            application/vnd.apple.mpegurl:
+              schema: { type: string }
+  /v1/playback/hls/{id}/video.m3u8:
+    get:
+      summary: HLS media playlist
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+      responses:
+        "200":
+          description: HLS media playlist
+          content:
+            application/vnd.apple.mpegurl:
+              schema: { type: string }
+  /v1/playback/hls/{id}/segment/{name}:
+    get:
+      summary: Generate or serve a cached HLS segment on demand
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, example: "000012.ts" }
+      responses:
+        "200":
+          description: MPEG-TS segment
+          content:
+            video/mp2t:
+              schema:
+                type: string
+                format: binary
+  /v1/playback/hls/{id}/variant/{variant}/video.m3u8:
+    get:
+      summary: HLS ABR variant playlist
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+        - name: variant
+          in: path
+          required: true
+          schema: { type: string, example: "720p" }
+      responses:
+        "200":
+          description: Variant media playlist
+          content:
+            application/vnd.apple.mpegurl:
+              schema: { type: string }
+  /v1/playback/hls/{id}/variant/{variant}/segment/{name}:
+    get:
+      summary: Generate or serve a cached HLS ABR variant segment on demand
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+        - name: variant
+          in: path
+          required: true
+          schema: { type: string, example: "720p" }
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, example: "000012.ts" }
+      responses:
+        "200":
+          description: MPEG-TS segment
+          content:
+            video/mp2t:
+              schema:
+                type: string
+                format: binary
+  /v1/playback/hls/{id}:
+    delete:
+      summary: Delete an HLS playback session and cache
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+      responses:
+        "204":
+          description: Session deleted
+  /v1/playback/dash/sessions:
+    post:
+      summary: Create a dynamic DASH playback session
+      description: Creates a virtual MPD timeline. No media segment is generated until a segment URL is requested.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DynamicDASHSessionRequest"
+      responses:
+        "200":
+          description: Dynamic DASH session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DynamicDASHSessionResponse"
+  /v1/playback/dash/{id}/manifest.mpd:
+    get:
+      summary: DASH MPD manifest
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+      responses:
+        "200":
+          description: MPD manifest
+          content:
+            application/dash+xml:
+              schema: { type: string }
+  /v1/playback/dash/{id}/segment/{name}:
+    get:
+      summary: Generate or serve a cached DASH fMP4 segment on demand
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, example: "000012.m4s" }
+      responses:
+        "200":
+          description: fMP4 segment
+          content:
+            video/iso.segment:
+              schema:
+                type: string
+                format: binary
+  /v1/playback/dash/{id}:
+    delete:
+      summary: Delete a DASH playback session and cache
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+      responses:
+        "204":
+          description: Session deleted
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    BearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    SessionID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error: { type: string }
+    ProbeRequest:
+      type: object
+      required: [input_path]
+      properties:
+        input_path: { type: string }
+    MediaInfo:
+      type: object
+      properties:
+        duration: { type: number, format: double }
+        width: { type: integer }
+        height: { type: integer }
+        fps: { type: number, format: double }
+        video_codec: { type: string }
+        audio_streams: { type: integer }
+        has_audio: { type: boolean }
+    HardwareAccelerationType:
+      type: string
+      enum: [none, amf, qsv, nvenc, v4l2m2m, vaapi, videotoolbox, rkmpp]
+    VideoCodec:
+      type: string
+      enum: [h264, hevc, av1, mjpeg]
+    RuntimeCapabilities:
+      type: object
+      properties:
+        ffmpeg_version: { type: string }
+        libavcodec_version: { type: integer }
+        libavformat_version: { type: integer }
+        libavutil_version: { type: integer }
+        hardware_device_types:
+          type: array
+          items: { type: string }
+        video_encoders:
+          type: array
+          items: { type: string }
+        video_decoders:
+          type: array
+          items: { type: string }
+        audio_encoders:
+          type: array
+          items: { type: string }
+        audio_decoders:
+          type: array
+          items: { type: string }
+        muxers:
+          type: array
+          items: { type: string }
+        demuxers:
+          type: array
+          items: { type: string }
+    HardwareCodecSupport:
+      type: object
+      properties:
+        codec:
+          $ref: "#/components/schemas/VideoCodec"
+        hardware:
+          $ref: "#/components/schemas/HardwareAccelerationType"
+        encoder_name: { type: string }
+        supported_by_policy: { type: boolean }
+        encoder_available_in_build: { type: boolean }
+        hw_device_type: { type: string }
+        hw_device_type_in_build: { type: boolean }
+        host_device_hint_available: { type: boolean }
+        runnable_likely: { type: boolean }
+        notes:
+          type: array
+          items: { type: string }
+    CapabilitySet:
+      type: object
+      properties:
+        audio_copy: { type: boolean }
+        audio_transcode_aac: { type: boolean }
+        dynamic_hls: { type: boolean }
+        dynamic_dash: { type: boolean }
+        on_demand_segments: { type: boolean }
+        segment_cache: { type: boolean }
+        prewarm: { type: boolean }
+        dynamic_abr_hls: { type: boolean }
+        metrics: { type: boolean }
+        cooperative_cancel: { type: boolean }
+        input_root_policy: { type: boolean }
+        static_transcoding: { type: boolean }
+        cancellation: { type: boolean }
+        auth: { type: boolean }
+        rate_limit: { type: boolean }
+        hardware_accelerators:
+          type: array
+          items:
+            $ref: "#/components/schemas/HardwareAccelerationType"
+        video_codecs:
+          type: array
+          items:
+            $ref: "#/components/schemas/VideoCodec"
+        unsupported:
+          type: array
+          items: { type: string }
+        runtime:
+          $ref: "#/components/schemas/RuntimeCapabilities"
+        hardware_support:
+          type: array
+          items:
+            $ref: "#/components/schemas/HardwareCodecSupport"
+    Metrics:
+      type: object
+      additionalProperties: true
+    AudioMode:
+      type: string
+      enum: [skip, copy, transcode]
+    TranscodeOptions:
+      type: object
+      properties:
+        width: { type: integer, minimum: 0 }
+        height: { type: integer, minimum: 0 }
+        fps: { type: number, format: double }
+        crf: { type: integer, minimum: 0, maximum: 51 }
+        preset: { type: string }
+        gop_size: { type: integer }
+        max_b_frames: { type: integer }
+        audio_mode:
+          $ref: "#/components/schemas/AudioMode"
+        audio_codec: { type: string }
+        audio_bitrate: { type: integer }
+        audio_channels: { type: integer }
+        start_time: { type: number, format: double }
+        duration: { type: number, format: double }
+    HLSOptions:
+      allOf:
+        - $ref: "#/components/schemas/TranscodeOptions"
+        - type: object
+          properties:
+            segment_seconds: { type: number, format: double, default: 4 }
+            segment_type: { type: string, enum: [mpegts, fmp4] }
+            playlist_type: { type: string, enum: [vod, event] }
+            list_size: { type: integer }
+    DASHOptions:
+      allOf:
+        - $ref: "#/components/schemas/TranscodeOptions"
+        - type: object
+          properties:
+            segment_seconds: { type: number, format: double, default: 4 }
+    LadderVariant:
+      type: object
+      properties:
+        name: { type: string }
+        width: { type: integer }
+        height: { type: integer }
+        video_bitrate: { type: integer }
+        crf: { type: integer }
+    DynamicHLSSessionRequest:
+      type: object
+      required: [input_path]
+      properties:
+        input_path: { type: string }
+        options:
+          $ref: "#/components/schemas/HLSOptions"
+        variants:
+          type: array
+          items:
+            $ref: "#/components/schemas/LadderVariant"
+        cache_dir: { type: string }
+        prewarm_segments: { type: integer, minimum: 0 }
+    DynamicHLSSessionResponse:
+      type: object
+      properties:
+        id: { type: string }
+        master_url: { type: string }
+        playlist_url: { type: string }
+        duration: { type: number, format: double }
+        segment_time: { type: number, format: double }
+        segment_count: { type: integer }
+        variants:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              width: { type: integer }
+              height: { type: integer }
+              bandwidth: { type: integer }
+        info:
+          $ref: "#/components/schemas/MediaInfo"
+    DynamicDASHSessionRequest:
+      type: object
+      required: [input_path]
+      properties:
+        input_path: { type: string }
+        options:
+          $ref: "#/components/schemas/DASHOptions"
+        cache_dir: { type: string }
+        prewarm_segments: { type: integer, minimum: 0 }
+    DynamicDASHSessionResponse:
+      type: object
+      properties:
+        id: { type: string }
+        manifest_url: { type: string }
+        duration: { type: number, format: double }
+        segment_time: { type: number, format: double }
+        segment_count: { type: integer }
+        info:
+          $ref: "#/components/schemas/MediaInfo"
+    DeviceCapabilities:
+      type: object
+      properties:
+        max_width: { type: integer }
+        max_height: { type: integer }
+        max_bitrate: { type: integer }
+        supported_video_codecs:
+          type: array
+          items:
+            $ref: "#/components/schemas/VideoCodec"
+        supported_audio_codecs:
+          type: array
+          items: { type: string }
+        hardware_acceleration_type:
+          $ref: "#/components/schemas/HardwareAccelerationType"
+    DevicePlanRequest:
+      type: object
+      required: [input_path, output_path]
+      properties:
+        input_path: { type: string }
+        output_path: { type: string }
+        capabilities:
+          $ref: "#/components/schemas/DeviceCapabilities"
+    Plan:
+      type: object
+      properties:
+        mode: { type: string }
+        input_path: { type: string }
+        output_path: { type: string }
+        encoder_name: { type: string }
+        video_codec:
+          $ref: "#/components/schemas/VideoCodec"
+        hardware:
+          $ref: "#/components/schemas/HardwareAccelerationType"
+        uses_hardware: { type: boolean }
+        warnings:
+          type: array
+          items: { type: string }

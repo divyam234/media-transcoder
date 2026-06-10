@@ -1,0 +1,21 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Build output
+build/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
