@@ -99,6 +99,7 @@ func transcodeVideo(ctx context.Context, input, output string, opts TranscodeOpt
 		audio_codec:    caudioCodec,
 		start_time:     C.double(opts.StartTime),
 		duration:       C.double(opts.Duration),
+		timestamp_offset: C.double(opts.TimestampOffset),
 		cancel_flag:    nil,
 	}
 	rc := withCancelFlag(ctx, func(flag *C.int) C.int {
@@ -148,6 +149,7 @@ func transcodeHLSVideo(ctx context.Context, input, playlist, segmentPattern stri
 		audio_codec:       caudioCodec,
 		start_time:        C.double(opts.StartTime),
 		duration:          C.double(opts.Duration),
+		timestamp_offset: C.double(opts.TimestampOffset),
 		cancel_flag:       nil,
 	}
 	rc := withCancelFlag(ctx, func(flag *C.int) C.int {
@@ -228,6 +230,7 @@ func transcodeSegmentVideo(ctx context.Context, input, output string, opts Trans
 		audio_codec:    caudioCodec,
 		start_time:     C.double(opts.StartTime),
 		duration:       C.double(opts.Duration),
+		timestamp_offset: C.double(opts.TimestampOffset),
 		cancel_flag:    nil,
 	}
 	rc := withCancelFlag(ctx, func(flag *C.int) C.int {
@@ -266,6 +269,7 @@ func transcodeFMP4SegmentVideo(ctx context.Context, input, output string, opts T
 		audio_codec:    caudioCodec,
 		start_time:     C.double(opts.StartTime),
 		duration:       C.double(opts.Duration),
+		timestamp_offset: C.double(opts.TimestampOffset),
 		cancel_flag:    nil,
 	}
 	rc := withCancelFlag(ctx, func(flag *C.int) C.int {

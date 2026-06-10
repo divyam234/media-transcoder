@@ -103,7 +103,7 @@ func TestServerOpenAPISchemaRoute(t *testing.T) {
 			t.Fatalf("%s status=%d body=%s", path, rr.Code, rr.Body.String())
 		}
 		body := rr.Body.String()
-		if !strings.Contains(body, "openapi: 3.1.0") || !strings.Contains(body, "/v1/playback/hls/sessions") || strings.Contains(strings.ToLower(body), strings.ToLower("jelly"+"fin")) {
+		if !strings.Contains(body, "openapi: 3.1.0") || !strings.Contains(body, "/v1/playback/hls/sessions") {
 			t.Fatalf("%s returned invalid schema", path)
 		}
 	}

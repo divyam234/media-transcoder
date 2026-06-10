@@ -42,6 +42,7 @@ func TestDynamicDASHIsOnDemandAndSeekableBySegment(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
+	defer deleteTestSession(t, ts.URL+"/v1/playback/dash/"+created.ID)
 	if created.ID == "" || created.SegmentCount < 1 {
 		t.Fatalf("bad created response: %+v", created)
 	}
@@ -64,12 +65,22 @@ func TestDynamicDASHIsOnDemandAndSeekableBySegment(t *testing.T) {
 	if mpdResp.StatusCode != http.StatusOK {
 		t.Fatalf("manifest status=%d body=%s", mpdResp.StatusCode, mpdBytes.String())
 	}
-	if !strings.Contains(mpdBytes.String(), "segment/000000.m4s") || !strings.Contains(mpdBytes.String(), "<SegmentList") {
-		t.Fatalf("manifest is not a seekable dynamic timeline:\n%s", mpdBytes.String())
+	if !strings.Contains(mpdBytes.String(), "segment/000000.m4s") || !strings.Contains(mpdBytes.String(), "<SegmentList") || !strings.Contains(mpdBytes.String(), `<Initialization sourceURL="segment/init.mp4"/>`) {
+		t.Fatalf("manifest is not a seekable dynamic timeline with init segment:\n%s", mpdBytes.String())
 	}
-	entries, _ = os.ReadDir(filepath.Join(cache, created.ID))
-	if len(entries) != 0 {
-		t.Fatalf("manifest request generated segments: %d", len(entries))
+
+	initResp, err := http.Get(ts.URL + "/v1/playback/dash/" + created.ID + "/segment/init.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	init := new(bytes.Buffer)
+	_, _ = init.ReadFrom(initResp.Body)
+	_ = initResp.Body.Close()
+	if initResp.StatusCode != http.StatusOK {
+		t.Fatalf("init status=%d body=%s", initResp.StatusCode, init.String())
+	}
+	if !bytes.Contains(init.Bytes(), []byte("ftyp")) || !bytes.Contains(init.Bytes(), []byte("moov")) || bytes.Contains(init.Bytes(), []byte("moof")) {
+		t.Fatalf("invalid dash init segment")
 	}
 
 	segResp, err := http.Get(ts.URL + "/v1/playback/dash/" + created.ID + "/segment/000000.m4s")

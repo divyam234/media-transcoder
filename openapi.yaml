@@ -182,17 +182,22 @@ paths:
   /v1/playback/hls/{id}/segment/{name}:
     get:
       summary: Generate or serve a cached HLS segment on demand
+      description: Returns MPEG-TS segments for segment_type=mpegts, fMP4 media fragments for segment_type=fmp4, or init.mp4 for the fMP4 initialization map.
       parameters:
         - $ref: "#/components/parameters/SessionID"
         - name: name
           in: path
           required: true
-          schema: { type: string, example: "000012.ts" }
+          schema: { type: string, example: "000012.m4s", description: "Use init.mp4 for initialization, or 000012.m4s for a media fragment." }
       responses:
         "200":
-          description: MPEG-TS segment
+          description: HLS segment
           content:
             video/mp2t:
+              schema:
+                type: string
+                format: binary
+            video/mp4:
               schema:
                 type: string
                 format: binary
@@ -214,6 +219,7 @@ paths:
   /v1/playback/hls/{id}/variant/{variant}/segment/{name}:
     get:
       summary: Generate or serve a cached HLS ABR variant segment on demand
+      description: Returns MPEG-TS segments for segment_type=mpegts, fMP4 media fragments for segment_type=fmp4, or init.mp4 for the fMP4 initialization map.
       parameters:
         - $ref: "#/components/parameters/SessionID"
         - name: variant
@@ -223,12 +229,16 @@ paths:
         - name: name
           in: path
           required: true
-          schema: { type: string, example: "000012.ts" }
+          schema: { type: string, example: "000012.m4s", description: "Use init.mp4 for initialization, or 000012.m4s for a media fragment." }
       responses:
         "200":
-          description: MPEG-TS segment
+          description: HLS segment
           content:
             video/mp2t:
+              schema:
+                type: string
+                format: binary
+            video/mp4:
               schema:
                 type: string
                 format: binary
@@ -270,16 +280,16 @@ paths:
               schema: { type: string }
   /v1/playback/dash/{id}/segment/{name}:
     get:
-      summary: Generate or serve a cached DASH fMP4 segment on demand
+      summary: Generate or serve cached DASH init.mp4 or fMP4 media segment on demand
       parameters:
         - $ref: "#/components/parameters/SessionID"
         - name: name
           in: path
           required: true
-          schema: { type: string, example: "000012.m4s" }
+          schema: { type: string, example: "000012.m4s", description: "Use init.mp4 for initialization, or 000012.m4s for a media fragment." }
       responses:
         "200":
-          description: fMP4 segment
+          description: DASH initialization section or fMP4 media segment
           content:
             video/iso.segment:
               schema:
@@ -444,7 +454,7 @@ components:
         - type: object
           properties:
             segment_seconds: { type: number, format: double, default: 4 }
-            segment_type: { type: string, enum: [mpegts, fmp4] }
+            segment_type: { type: string, enum: [mpegts, fmp4], default: mpegts, description: "mpegts emits .ts segments; fmp4 emits EXT-X-MAP init.mp4 plus .m4s moof/mdat media fragments." }
             playlist_type: { type: string, enum: [vod, event] }
             list_size: { type: integer }
     DASHOptions:

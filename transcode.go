@@ -33,7 +33,7 @@ type TranscodeOptions struct {
 	// Color/HDR planning knobs. The direct software bridge accepts them as stable
 	// API fields; hardware tone-map execution is guarded by BuildPlan capability
 	// checks until device-specific contexts are available.
-	ToneMap      ToneMapOptions `json:"tone_map,omitempty"`
+	ToneMap      ToneMapOptions `json:"tone_map"`
 	VideoBitrate int            `json:"video_bitrate,omitempty"`
 
 	// StartTime and Duration are used by dynamic/on-demand playback paths.
@@ -41,6 +41,11 @@ type TranscodeOptions struct {
 	// output timestamps reset to zero by the direct libav bridge.
 	StartTime float64 `json:"start_time,omitempty"`
 	Duration  float64 `json:"duration,omitempty"`
+
+	// TimestampOffset shifts encoded packet timestamps in the output. Dynamic HLS
+	// uses this so independently generated MPEG-TS segments form one continuous
+	// playlist timeline instead of resetting PTS/DTS to zero at every segment.
+	TimestampOffset float64 `json:"timestamp_offset,omitempty"`
 }
 
 // HLSOptions controls HLS VOD/event output.

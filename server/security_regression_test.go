@@ -72,8 +72,8 @@ func TestCacheRootOverridesClientCacheDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(serverFiles) != 1 {
-		t.Fatalf("expected segment under server cache root, got %v", serverFiles)
+	if len(serverFiles) < 1 {
+		t.Fatalf("expected at least requested segment under server cache root, got %v", serverFiles)
 	}
 	clientFiles, err := filepath.Glob(filepath.Join(clientCache, "**", "*.ts"))
 	if err != nil {

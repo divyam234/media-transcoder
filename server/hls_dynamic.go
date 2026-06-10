@@ -149,6 +149,9 @@ func (s *Server) createDynamicHLSSession(ctx context.Context, w http.ResponseWri
 			req.Options.AudioMode = transcoder.AudioSkip
 		}
 	}
+	if req.PrewarmSegments <= 0 {
+		req.PrewarmSegments = 3
+	}
 	id := newID()
 	cacheRoot := s.cacheRootFor(req.CacheDir, "media-transcoder-hls")
 	cacheDir := filepath.Join(cacheRoot, id)
@@ -161,6 +164,7 @@ func (s *Server) createDynamicHLSSession(ctx context.Context, w http.ResponseWri
 	sess.Variants = buildHLSVariants(req.Options, req.Variants, info)
 	s.dynHLS.Add(sess)
 	s.metrics.hlsSessions.Add(1)
+	s.logger.Info("hls session created", "id", id, "input", req.InputPath, "duration", info.Duration, "segments", int(math.Ceil(info.Duration/req.Options.SegmentSeconds)), "segment_seconds", req.Options.SegmentSeconds, "audio_mode", req.Options.AudioMode, "prewarm_segments", req.PrewarmSegments)
 	writeJSON(w, http.StatusCreated, s.dynamicHLSResponse(r, sess))
 }
 
@@ -171,7 +175,7 @@ func (s *Server) dynamicHLSResponse(r *http.Request, sess *DynamicHLSSession) Dy
 }
 
 func (s *Server) dynamicHLSMaster(_ context.Context, w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := routeParam(r, "id")
 	sess, ok := s.dynHLS.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("hls session not found"))
@@ -191,12 +195,13 @@ func (s *Server) dynamicHLSMaster(_ context.Context, w http.ResponseWriter, r *h
 		b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d\n%s\n", v.Bandwidth, v.Width, v.Height, uri))
 	}
 	body := b.String()
+	s.logger.Debug("hls master served", "id", id, "variants", len(vars))
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	_, _ = w.Write([]byte(body))
 }
 
 func (s *Server) deleteDynamicHLSSession(_ context.Context, w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := routeParam(r, "id")
 	sess, ok := s.dynHLS.Delete(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("hls session not found"))
@@ -210,14 +215,17 @@ func (s *Server) deleteDynamicHLSSession(_ context.Context, w http.ResponseWrite
 }
 
 func (s *Server) dynamicHLSPlaylist(_ context.Context, w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := routeParam(r, "id")
 	sess, ok := s.dynHLS.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("hls session not found"))
 		return
 	}
+	variant := defaultHLSVariant(sess)
+	s.prewarmHLS(sess, variant, 0, max(1, sess.PrewarmSegments))
+	s.logger.Debug("hls playlist served", "id", id, "variant", variant.Name, "prewarm", sess.PrewarmSegments)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	_, _ = w.Write([]byte(buildDynamicPlaylist(sess, defaultHLSVariant(sess))))
+	_, _ = w.Write([]byte(buildDynamicPlaylist(sess, variant)))
 }
 
 func buildDynamicPlaylist(sess *DynamicHLSSession, variant DynamicHLSVariant) string {
@@ -230,14 +238,26 @@ func buildDynamicPlaylist(sess *DynamicHLSSession, variant DynamicHLSVariant) st
 	if count < 1 {
 		count = 1
 	}
+	isFMP4 := hlsUsesFMP4(variant)
 	target := int(math.Ceil(segDur))
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
-	b.WriteString("#EXT-X-VERSION:6\n")
+	if isFMP4 {
+		b.WriteString("#EXT-X-VERSION:7\n")
+	} else {
+		b.WriteString("#EXT-X-VERSION:6\n")
+	}
 	b.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", target))
 	b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
 	b.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
 	b.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
+	if isFMP4 {
+		// Dynamic fMP4 segments are generated independently on demand. The MAP
+		// URI is relative to this media playlist and works for both default and
+		// named variant routes. We repeat it after discontinuities below because
+		// some players reset fMP4 track state at each boundary.
+		b.WriteString("#EXT-X-MAP:URI=\"segment/init.mp4\"\n")
+	}
 	for i := 0; i < count; i++ {
 		d := segDur
 		if end := float64(i+1) * segDur; end > dur && dur > float64(i)*segDur {
@@ -246,18 +266,51 @@ func buildDynamicPlaylist(sess *DynamicHLSSession, variant DynamicHLSVariant) st
 		if d <= 0 {
 			d = segDur
 		}
-		b.WriteString(fmt.Sprintf("#EXTINF:%.3f,\nsegment/%06d.ts\n", d, i))
+		// All dynamic HLS segments are generated as independent seek/transcode
+		// windows. Advertise discontinuities so players do not try to force AAC
+		// encoder priming or fresh fMP4 fragments into one continuous mux timeline.
+		// The EXTINF list still gives the player a correct VOD seek timeline.
+		if i > 0 {
+			b.WriteString("#EXT-X-DISCONTINUITY\n")
+		}
+		b.WriteString(fmt.Sprintf("#EXTINF:%.3f,\nsegment/%06d%s\n", d, i, hlsSegmentExt(variant)))
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
 	return b.String()
 }
 
-func hlsSegmentPath(sess *DynamicHLSSession, variant DynamicHLSVariant, idx int) string {
+func hlsUsesFMP4(variant DynamicHLSVariant) bool {
+	return strings.EqualFold(strings.TrimSpace(variant.Options.SegmentType), "fmp4")
+}
+
+func hlsSegmentExt(variant DynamicHLSVariant) string {
+	if hlsUsesFMP4(variant) {
+		return ".m4s"
+	}
+	return ".ts"
+}
+
+func hlsSegmentContentType(variant DynamicHLSVariant) string {
+	if hlsUsesFMP4(variant) {
+		return "video/mp4"
+	}
+	return "video/mp2t"
+}
+
+func hlsVariantDir(sess *DynamicHLSSession, variant DynamicHLSVariant) string {
 	name := safeVariantName(variant.Name)
 	if name == "" || name == "default" {
-		return filepath.Join(sess.CacheDir, fmt.Sprintf("%06d.ts", idx))
+		return sess.CacheDir
 	}
-	return filepath.Join(sess.CacheDir, name, fmt.Sprintf("%06d.ts", idx))
+	return filepath.Join(sess.CacheDir, name)
+}
+
+func hlsInitPath(sess *DynamicHLSSession, variant DynamicHLSVariant) string {
+	return filepath.Join(hlsVariantDir(sess, variant), "init.mp4")
+}
+
+func hlsSegmentPath(sess *DynamicHLSSession, variant DynamicHLSVariant, idx int) string {
+	return filepath.Join(hlsVariantDir(sess, variant), fmt.Sprintf("%06d%s", idx, hlsSegmentExt(variant)))
 }
 
 func buildHLSVariants(base transcoder.HLSOptions, requested []transcoder.LadderVariant, info transcoder.MediaInfo) []DynamicHLSVariant {
@@ -364,6 +417,7 @@ func findHLSVariant(sess *DynamicHLSSession, name string) (DynamicHLSVariant, bo
 
 func parseSegmentIndex(name string) (int, error) {
 	name = strings.TrimSuffix(name, ".ts")
+	name = strings.TrimSuffix(name, ".m4s")
 	name = strings.TrimPrefix(name, "seg-")
 	name = strings.TrimPrefix(name, "segment-")
 	if name == "" {
@@ -381,40 +435,55 @@ func (s *Server) dynamicHLSSegment(ctx context.Context, w http.ResponseWriter, r
 }
 
 func (s *Server) dynamicHLSVariantPlaylist(_ context.Context, w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := routeParam(r, "id")
 	sess, ok := s.dynHLS.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("hls session not found"))
 		return
 	}
-	variant, ok := findHLSVariant(sess, r.PathValue("variant"))
+	variant, ok := findHLSVariant(sess, routeParam(r, "variant"))
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("hls variant not found"))
 		return
 	}
+	s.prewarmHLS(sess, variant, 0, max(1, sess.PrewarmSegments))
+	s.logger.Debug("hls variant playlist served", "id", id, "variant", variant.Name, "prewarm", sess.PrewarmSegments)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	_, _ = w.Write([]byte(buildDynamicPlaylist(sess, variant)))
 }
 
 func (s *Server) dynamicHLSNamedVariantSegment(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	s.dynamicHLSVariantSegment(ctx, w, r, r.PathValue("variant"))
+	s.dynamicHLSVariantSegment(ctx, w, r, routeParam(r, "variant"))
 }
 
 func (s *Server) dynamicHLSVariantSegment(ctx context.Context, w http.ResponseWriter, r *http.Request, variantName string) {
-	id := r.PathValue("id")
+	id := routeParam(r, "id")
 	sess, ok := s.dynHLS.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("hls session not found"))
 		return
 	}
-	idx, err := parseSegmentIndex(r.PathValue("name"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
+	name := routeParam(r, "name")
 	variant, ok := findHLSVariant(sess, variantName)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("hls variant not found"))
+		return
+	}
+	if hlsUsesFMP4(variant) && name == "init.mp4" {
+		initPath := hlsInitPath(sess, variant)
+		if err := s.ensureDynamicVariantSegment(ctx, sess, variant, 0, hlsSegmentPath(sess, variant, 0)); err != nil {
+			s.logger.Warn("hls fmp4 init failed", "id", id, "variant", variant.Name, "err", err)
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		http.ServeFile(w, r, initPath)
+		return
+	}
+	idx, err := parseSegmentIndex(name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	segDur := variant.Options.SegmentSeconds
@@ -424,21 +493,40 @@ func (s *Server) dynamicHLSVariantSegment(ctx context.Context, w http.ResponseWr
 		return
 	}
 	path := hlsSegmentPath(sess, variant, idx)
+	s.prewarmHLS(sess, variant, idx+1, sess.PrewarmSegments)
 	if err := s.ensureDynamicVariantSegment(ctx, sess, variant, idx, path); err != nil {
+		s.logger.Warn("hls segment failed", "id", id, "variant", variant.Name, "index", idx, "err", err)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	for n := 1; n <= sess.PrewarmSegments; n++ {
-		next := idx + n
-		if next < count {
-			go func(i int) {
-				_ = s.ensureDynamicVariantSegment(sess.ctx, sess, variant, i, hlsSegmentPath(sess, variant, i))
-			}(next)
-		}
-	}
-	w.Header().Set("Content-Type", "video/mp2t")
+	w.Header().Set("Content-Type", hlsSegmentContentType(variant))
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	http.ServeFile(w, r, path)
+}
+
+func (s *Server) prewarmHLS(sess *DynamicHLSSession, variant DynamicHLSVariant, startIdx, count int) {
+	if sess == nil || count <= 0 || sess.ctx == nil || sess.ctx.Err() != nil {
+		return
+	}
+	segDur := variant.Options.SegmentSeconds
+	if segDur <= 0 {
+		segDur = 4
+	}
+	maxCount := int(math.Ceil(sess.Info.Duration / segDur))
+	for n := 0; n < count; n++ {
+		idx := startIdx + n
+		if idx < 0 || idx >= maxCount {
+			continue
+		}
+		path := hlsSegmentPath(sess, variant, idx)
+		go func(i int, p string) {
+			if err := s.ensureDynamicVariantSegment(sess.ctx, sess, variant, i, p); err != nil {
+				if sess.ctx.Err() == nil {
+					s.logger.Debug("hls prewarm failed", "id", sess.ID, "variant", variant.Name, "index", i, "err", err)
+				}
+			}
+		}(idx, path)
+	}
 }
 
 func (s *Server) ensureDynamicSegment(ctx context.Context, sess *DynamicHLSSession, idx int, path string) error {
@@ -456,6 +544,7 @@ func (s *Server) ensureDynamicVariantSegment(ctx context.Context, sess *DynamicH
 	}
 	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
 		s.metrics.segmentCacheHits.Add(1)
+		s.logger.Debug("hls segment cache hit", "id", sess.ID, "variant", variant.Name, "index", idx, "path", path, "bytes", st.Size())
 		return nil
 	}
 	lock := s.dynHLS.segmentLock(sess.ID + ":" + variant.Name + ":" + strconv.Itoa(idx))
@@ -463,6 +552,7 @@ func (s *Server) ensureDynamicVariantSegment(ctx context.Context, sess *DynamicH
 	defer lock.Unlock()
 	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
 		s.metrics.segmentCacheHits.Add(1)
+		s.logger.Debug("hls segment cache hit after lock", "id", sess.ID, "variant", variant.Name, "index", idx, "path", path, "bytes", st.Size())
 		return nil
 	}
 	select {
@@ -481,6 +571,11 @@ func (s *Server) ensureDynamicVariantSegment(ctx context.Context, sess *DynamicH
 	opts := variant.Options.TranscodeOptions
 	opts.StartTime = float64(idx) * variant.Options.SegmentSeconds
 	opts.Duration = variant.Options.SegmentSeconds
+	// HLS media segments are generated as independent windows and the playlist
+	// marks every boundary as a discontinuity. Keep packet timestamps local to
+	// each segment; this is significantly more robust for VLC/hls.js seeking than
+	// pretending independently encoded AAC/fMP4 windows are one continuous stream.
+	opts.TimestampOffset = 0
 	opts.FastStart = false
 	// Audio copy inside arbitrary on-demand segments needs timestamp-perfect trimming.
 	// Keep the default safe for browser seeking; audio support can be enabled by caller once validated for the source/profile.
@@ -495,15 +590,92 @@ func (s *Server) ensureDynamicVariantSegment(ctx context.Context, sess *DynamicH
 	stop := context.AfterFunc(sess.ctx, cancel)
 	defer stop()
 	defer cancel()
-	if _, err := transcoder.TranscodeSegmentFromFile(genCtx, sess.InputPath, tmp, opts); err != nil {
-		s.metrics.segmentErrors.Add(1)
-		_ = os.Remove(tmp)
-		return err
+	started := time.Now()
+	s.logger.Info("hls segment generate start", "id", sess.ID, "variant", variant.Name, "index", idx, "start_time", opts.StartTime, "duration", opts.Duration, "audio_mode", opts.AudioMode, "output", path)
+	if hlsUsesFMP4(variant) {
+		fullTmp := tmp + ".full.mp4"
+		_ = os.Remove(fullTmp)
+		if _, err := transcoder.TranscodeFMP4SegmentFromFile(genCtx, sess.InputPath, fullTmp, opts); err != nil {
+			s.metrics.segmentErrors.Add(1)
+			_ = os.Remove(fullTmp)
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := splitHLSFMP4(fullTmp, hlsInitPath(sess, variant), tmp); err != nil {
+			s.metrics.segmentErrors.Add(1)
+			_ = os.Remove(fullTmp)
+			_ = os.Remove(tmp)
+			return err
+		}
+		_ = os.Remove(fullTmp)
+	} else {
+		if _, err := transcoder.TranscodeSegmentFromFile(genCtx, sess.InputPath, tmp, opts); err != nil {
+			s.metrics.segmentErrors.Add(1)
+			_ = os.Remove(tmp)
+			return err
+		}
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		s.metrics.segmentErrors.Add(1)
 		return err
 	}
+	if st, statErr := os.Stat(path); statErr == nil {
+		s.logger.Info("hls segment generate done", "id", sess.ID, "variant", variant.Name, "index", idx, "elapsed", time.Since(started).String(), "bytes", st.Size(), "path", path)
+	} else {
+		s.logger.Info("hls segment generate done", "id", sess.ID, "variant", variant.Name, "index", idx, "elapsed", time.Since(started).String(), "path", path)
+	}
 	s.metrics.segmentsGenerated.Add(1)
 	return nil
+}
+
+func splitHLSFMP4(fullPath, initPath, mediaPath string) error {
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return err
+	}
+	moof := findMP4Box(data, "moof")
+	if moof <= 0 || moof >= len(data) {
+		return fmt.Errorf("generated fMP4 segment does not contain a moof box")
+	}
+	if err := os.MkdirAll(filepath.Dir(initPath), 0o755); err != nil {
+		return err
+	}
+	if st, err := os.Stat(initPath); err != nil || st.Size() == 0 {
+		if err := os.WriteFile(initPath+".tmp", data[:moof], 0o644); err != nil {
+			return err
+		}
+		if err := os.Rename(initPath+".tmp", initPath); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(mediaPath, data[moof:], 0o644)
+}
+
+func findMP4Box(data []byte, typ string) int {
+	if len(typ) != 4 {
+		return -1
+	}
+	for off := 0; off+8 <= len(data); {
+		sz := int(uint32(data[off])<<24 | uint32(data[off+1])<<16 | uint32(data[off+2])<<8 | uint32(data[off+3]))
+		boxType := string(data[off+4 : off+8])
+		if boxType == typ {
+			return off
+		}
+		if sz == 1 {
+			if off+16 > len(data) {
+				return -1
+			}
+			sz64 := uint64(data[off+8])<<56 | uint64(data[off+9])<<48 | uint64(data[off+10])<<40 | uint64(data[off+11])<<32 | uint64(data[off+12])<<24 | uint64(data[off+13])<<16 | uint64(data[off+14])<<8 | uint64(data[off+15])
+			if sz64 > uint64(len(data)-off) || sz64 < 16 {
+				return -1
+			}
+			sz = int(sz64)
+		} else if sz == 0 {
+			return -1
+		} else if sz < 8 || off+sz > len(data) {
+			return -1
+		}
+		off += sz
+	}
+	return -1
 }

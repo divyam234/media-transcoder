@@ -32,6 +32,7 @@ typedef struct TCTranscodeOptions {
     const char *audio_codec;
     double start_time;
     double duration;
+    double timestamp_offset;
     volatile int *cancel_flag;
 } TCTranscodeOptions;
 

@@ -1,6 +1,6 @@
-// Package transcoder is a direct-libav media transcoding library.
+// Package transcoder is a direct-libav media playback/transcoding library.
 //
-// It provides progressive MP4, HLS, DASH, ABR-HLS, profile-driven planning,
-// audio copy support, and HTTP-server integration without spawning ffmpeg or
-// ffprobe at runtime.
+// The HTTP server built on this package is a dynamic playback origin: it serves
+// virtual HLS/DASH manifests and generates requested segments on demand without
+// spawning ffmpeg or ffprobe at runtime.
 package transcoder

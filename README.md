@@ -39,7 +39,9 @@ export CGO_LDFLAGS="-Wl,--disable-new-dtags -Wl,-rpath,$FFMPEG_PREFIX/lib"
   --rate-limit 120 \
   --cache-root /var/cache/media-transcoder \
   --allow-input-root /srv/media \
-  --api-keys secret1,secret2
+  --api-keys secret1,secret2 \
+  --cors-origins "http://localhost:5173,https://player.example" \
+  --debug
 ```
 
 Auth is disabled when `--api-keys` is empty. When enabled, send either:
@@ -53,6 +55,33 @@ or:
 ```http
 Authorization: Bearer secret1
 ```
+
+
+## Routing and CORS
+
+The HTTP service uses `github.com/go-chi/chi/v5` for routing and middleware. Dynamic route parameters are handled through chi URL params, so routes like `/v1/playback/hls/{id}/segment/{name}` are independent of Go stdlib ServeMux pattern behavior.
+
+CORS is enabled through `github.com/go-chi/cors`. Preflight `OPTIONS` requests are handled before auth/rate limiting, which is required for browser players and generated clients.
+
+Default CORS behavior allows public playback during development:
+
+```bash
+--cors-origins "*"
+```
+
+For production, prefer explicit origins:
+
+```bash
+--cors-origins "https://app.example.com,https://player.example.com"
+```
+
+If you enable credentialed browser requests, do not use wildcard origins:
+
+```bash
+--cors-origins "https://app.example.com" --cors-credentials
+```
+
+Allowed request headers include `Authorization`, `Content-Type`, `Range`, and `X-API-Key`. Exposed response headers include `Accept-Ranges`, `Content-Length`, `Content-Range`, and `Content-Type`.
 
 ## HTTP API
 
@@ -109,7 +138,7 @@ POST /v1/playback/hls/sessions
     "width": 1280,
     "fps": 24,
     "segment_seconds": 4,
-    "audio_mode": "skip",
+    "audio_mode": "transcode",
     "crf": 28,
     "preset": "ultrafast"
   }
@@ -134,7 +163,9 @@ Response:
 ```txt
 GET /v1/playback/hls/{id}/master.m3u8
 GET /v1/playback/hls/{id}/video.m3u8
-GET    /v1/playback/hls/{id}/segment/{index}.ts
+GET    /v1/playback/hls/{id}/segment/{index}.ts       # MPEG-TS mode
+GET    /v1/playback/hls/{id}/segment/init.mp4         # fMP4 mode init map
+GET    /v1/playback/hls/{id}/segment/{index}.m4s      # fMP4 mode media fragment
 DELETE /v1/playback/hls/{id}
 ```
 
@@ -145,6 +176,37 @@ segment index -> start time = index * segment_seconds
 ```
 
 Server seeks input via libav, transcodes that segment window, caches it, and serves it. `DELETE /v1/playback/hls/{id}` cancels the session context, removes its cache directory, and releases per-segment lock bookkeeping.
+
+
+### HLS fMP4/CMAF mode
+
+Set `options.segment_type` to `"fmp4"` to emit HLS playlists with an `#EXT-X-MAP` initialization section and `.m4s` media fragments:
+
+```json
+{
+  "input_path": "/media/movie.mkv",
+  "prewarm_segments": 4,
+  "options": {
+    "width": 1280,
+    "segment_seconds": 4,
+    "segment_type": "fmp4",
+    "audio_mode": "transcode",
+    "crf": 28,
+    "preset": "ultrafast"
+  }
+}
+```
+
+The returned media playlist uses:
+
+```m3u8
+#EXT-X-VERSION:7
+#EXT-X-MAP:URI="segment/init.mp4"
+#EXTINF:4.000,
+segment/000000.m4s
+```
+
+Use MPEG-TS for maximum legacy compatibility. Use fMP4 when you want a modern HLS path that is closer to DASH/CMAF and can share more logic with `.m4s` DASH segment generation. Because this server generates seeked segments independently on demand, HLS fMP4 playlists also mark segment boundaries with `#EXT-X-DISCONTINUITY`; the single shared `init.mp4` map is still used for all `.m4s` fragments.
 
 ### Dynamic ABR HLS
 
@@ -226,7 +288,7 @@ POST /v1/playback/dash/sessions
     "width": 1280,
     "fps": 24,
     "segment_seconds": 4,
-    "audio_mode": "skip",
+    "audio_mode": "transcode",
     "crf": 28,
     "preset": "ultrafast"
   }
@@ -248,12 +310,13 @@ Response:
 ### DASH URLs
 
 ```txt
-GET /v1/playback/dash/{id}/manifest.mpd
+GET    /v1/playback/dash/{id}/manifest.mpd
+GET    /v1/playback/dash/{id}/segment/init.mp4
 GET    /v1/playback/dash/{id}/segment/{index}.m4s
 DELETE /v1/playback/dash/{id}
 ```
 
-MPD is virtual. Segments generated on demand as fragmented MP4 windows. `DELETE /v1/playback/dash/{id}` cancels the session context, removes its cache directory, and releases per-segment lock bookkeeping.
+MPD is virtual. It advertises an explicit `segment/init.mp4` initialization section and on-demand `.m4s` media fragments. `DELETE /v1/playback/dash/{id}` cancels the session context, removes its cache directory, and releases per-segment lock bookkeeping.
 
 ## Removed static endpoints
 
@@ -277,7 +340,11 @@ Timestamp-trimmed audio for arbitrary HLS/DASH segment requests.
 - `audio_mode: "transcode"` — decode, trim to segment window with `atrim`, reset timestamps with `asetpts`, resample/format for AAC, mux into segment
 - omitted defaults to `"transcode"` when source has audio, otherwise `"skip"`
 
-Output audio starts at timestamp zero. Duration stays bounded to requested segment duration. No packet-copy — copy cannot sample-trim safely inside audio packets. `audio_mode: "copy"` accepted in low-level API for compatibility only.
+No packet-copy is used for dynamic playback audio because copy cannot sample-trim safely inside compressed audio packets.
+
+For HLS MPEG-TS, every on-demand segment is generated independently, so the virtual playlist marks each segment boundary with `#EXT-X-DISCONTINUITY`. This avoids hard player stalls caused by AAC encoder priming/padding creating non-monotonic DTS across separately generated segments.
+
+For HLS fMP4, the server writes a shared `init.mp4` map and `.m4s` media fragments. Segment boundaries are marked with `#EXT-X-DISCONTINUITY` because each segment is independently generated from a seek window. This is more robust for VLC/hls.js seeking than pretending separately encoded AAC/fMP4 windows are one continuous mux stream.
 
 ## Hardware acceleration capabilities
 
@@ -374,3 +441,13 @@ GET /v1/capabilities/hardware
 - `hw_device_type_in_build` — FFmpeg exposes that hardware device API (`cuda`, `vaapi`, `qsv`, etc.)
 - `host_device_hint_available` — best-effort host check (`/dev/dri/renderD128`, `/dev/nvidia0`, etc.)
 - `runnable_likely` — true only when build support and host hints both look usable
+
+
+## Debugging playback
+
+Run with `--debug` to see dynamic playback events: session creation, playlist serving,
+segment generation start/end, cache hits, segment byte size, elapsed time, and errors.
+For difficult HEVC/10-bit sources, keep `--max-jobs` at `4` or higher and use
+`prewarm_segments` in the HLS session request so the next segments are generated
+before the player reaches them. The long-source regression uses a real HLS client
+to ensure playback does not hang on the first several segments.

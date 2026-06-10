@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,10 @@ import (
 	"time"
 
 	transcoder "media-transcoder"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 )
 
 type Config struct {
@@ -31,10 +36,22 @@ type Config struct {
 	CacheRoot string
 	// AllowedInputRoots restricts input_path to these roots. Empty means allow any path.
 	AllowedInputRoots []string
+	CORS              CORSConfig
+}
+
+// CORSConfig controls browser access to the dynamic playback API.
+// Empty values use safe public-playback defaults suitable for local media origins.
+type CORSConfig struct {
+	AllowedOrigins   []string
+	AllowedMethods   []string
+	AllowedHeaders   []string
+	ExposedHeaders   []string
+	AllowCredentials bool
+	MaxAge           int
 }
 
 type Server struct {
-	mux               *http.ServeMux
+	router            chi.Router
 	logger            *slog.Logger
 	timeout           time.Duration
 	keys              []string
@@ -49,48 +66,81 @@ type Server struct {
 
 func New(cfg Config) *Server {
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = 30 * time.Minute
 	}
 	if cfg.MaxConcurrentJobs <= 0 {
-		cfg.MaxConcurrentJobs = 2
+		cfg.MaxConcurrentJobs = 4
 	}
-	s := &Server{mux: http.NewServeMux(), logger: cfg.Logger, timeout: cfg.RequestTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots)}
-	s.routes()
+	s := &Server{router: chi.NewRouter(), logger: cfg.Logger, timeout: cfg.RequestTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots)}
+	s.routes(cfg.CORS)
 	return s
 }
 
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler { return s.router }
 
-func (s *Server) routes() {
-	s.handle("GET /healthz", http.HandlerFunc(s.health))
-	s.handle("GET /v1/capabilities", s.withTimeout(s.capabilities))
-	s.handle("GET /v1/capabilities/runtime", s.withTimeout(s.runtimeCapabilities))
-	s.handle("GET /v1/capabilities/codecs", s.withTimeout(s.codecCapabilities))
-	s.handle("GET /v1/capabilities/hardware", s.withTimeout(s.hardwareCapabilities))
-	s.handle("GET /v1/metrics", s.withTimeout(s.metricsHandler))
-	s.handle("POST /v1/probe", s.withTimeout(s.probe))
-	s.handle("POST /v1/plan/device", s.withTimeout(s.devicePlan))
-	// Dynamic playback origin endpoints only. This service intentionally does not
-	// expose static "transcode-to-output" routes; playlists/manifests are virtual
-	// and media segments are generated on demand by direct libav seeking.
-	s.handle("POST /v1/playback/hls/sessions", s.withTimeout(s.createDynamicHLSSession))
-	s.handle("GET /v1/playback/hls/{id}/master.m3u8", s.withTimeout(s.dynamicHLSMaster))
-	s.handle("GET /v1/playback/hls/{id}/video.m3u8", s.withTimeout(s.dynamicHLSPlaylist))
-	s.handle("GET /v1/playback/hls/{id}/segment/{name}", s.withTimeout(s.dynamicHLSSegment))
-	s.handle("GET /v1/playback/hls/{id}/variant/{variant}/video.m3u8", s.withTimeout(s.dynamicHLSVariantPlaylist))
-	s.handle("GET /v1/playback/hls/{id}/variant/{variant}/segment/{name}", s.withTimeout(s.dynamicHLSNamedVariantSegment))
-	s.handle("DELETE /v1/playback/hls/{id}", s.withTimeout(s.deleteDynamicHLSSession))
+func (s *Server) routes(corsCfg CORSConfig) {
+	r := s.router
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Recoverer)
+	r.Use(cors.Handler(normalizeCORS(corsCfg)))
 
-	s.handle("POST /v1/playback/dash/sessions", s.withTimeout(s.createDynamicDASHSession))
-	s.handle("GET /v1/playback/dash/{id}/manifest.mpd", s.withTimeout(s.dynamicDASHManifest))
-	s.handle("GET /v1/playback/dash/{id}/segment/{name}", s.withTimeout(s.dynamicDASHSegment))
-	s.handle("DELETE /v1/playback/dash/{id}", s.withTimeout(s.deleteDynamicDASHSession))
+	r.Group(func(r chi.Router) {
+		r.Use(s.secure)
+		r.Get("/healthz", s.health)
+		r.Get("/v1/capabilities", s.withTimeout(s.capabilities))
+		r.Get("/v1/capabilities/runtime", s.withTimeout(s.runtimeCapabilities))
+		r.Get("/v1/capabilities/codecs", s.withTimeout(s.codecCapabilities))
+		r.Get("/v1/capabilities/hardware", s.withTimeout(s.hardwareCapabilities))
+		r.Get("/v1/metrics", s.withTimeout(s.metricsHandler))
+		r.Post("/v1/probe", s.withTimeout(s.probe))
+		r.Post("/v1/plan/device", s.withTimeout(s.devicePlan))
+		// Dynamic playback origin endpoints only. This service intentionally does not
+		// expose static "transcode-to-output" routes; playlists/manifests are virtual
+		// and media segments are generated on demand by direct libav seeking.
+		r.Post("/v1/playback/hls/sessions", s.withTimeout(s.createDynamicHLSSession))
+		r.Get("/v1/playback/hls/{id}/master.m3u8", s.withTimeout(s.dynamicHLSMaster))
+		r.Get("/v1/playback/hls/{id}/video.m3u8", s.withTimeout(s.dynamicHLSPlaylist))
+		r.Get("/v1/playback/hls/{id}/segment/{name}", s.withTimeout(s.dynamicHLSSegment))
+		r.Get("/v1/playback/hls/{id}/variant/{variant}/video.m3u8", s.withTimeout(s.dynamicHLSVariantPlaylist))
+		r.Get("/v1/playback/hls/{id}/variant/{variant}/segment/{name}", s.withTimeout(s.dynamicHLSNamedVariantSegment))
+		r.Delete("/v1/playback/hls/{id}", s.withTimeout(s.deleteDynamicHLSSession))
+
+		r.Post("/v1/playback/dash/sessions", s.withTimeout(s.createDynamicDASHSession))
+		r.Get("/v1/playback/dash/{id}/manifest.mpd", s.withTimeout(s.dynamicDASHManifest))
+		r.Get("/v1/playback/dash/{id}/segment/{name}", s.withTimeout(s.dynamicDASHSegment))
+		r.Delete("/v1/playback/dash/{id}", s.withTimeout(s.deleteDynamicDASHSession))
+	})
 }
 
-func (s *Server) handle(pattern string, h http.Handler) { s.mux.Handle(pattern, s.secure(h)) }
+func normalizeCORS(cfg CORSConfig) cors.Options {
+	if len(cfg.AllowedOrigins) == 0 {
+		cfg.AllowedOrigins = []string{"*"}
+	}
+	if len(cfg.AllowedMethods) == 0 {
+		cfg.AllowedMethods = []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions}
+	}
+	if len(cfg.AllowedHeaders) == 0 {
+		cfg.AllowedHeaders = []string{"Accept", "Authorization", "Content-Type", "Range", "X-API-Key", "X-Requested-With"}
+	}
+	if len(cfg.ExposedHeaders) == 0 {
+		cfg.ExposedHeaders = []string{"Accept-Ranges", "Content-Length", "Content-Range", "Content-Type"}
+	}
+	if cfg.MaxAge == 0 {
+		cfg.MaxAge = 300
+	}
+	return cors.Options{
+		AllowedOrigins:   cfg.AllowedOrigins,
+		AllowedMethods:   cfg.AllowedMethods,
+		AllowedHeaders:   cfg.AllowedHeaders,
+		ExposedHeaders:   cfg.ExposedHeaders,
+		AllowCredentials: cfg.AllowCredentials,
+		MaxAge:           cfg.MaxAge,
+	}
+}
 
 func (s *Server) secure(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +179,8 @@ func (s *Server) withTimeout(fn func(context.Context, http.ResponseWriter, *http
 		fn(ctx, w, r)
 	}
 }
+
+func routeParam(r *http.Request, key string) string { return chi.URLParam(r, key) }
 
 func cleanRoots(roots []string) []string {
 	out := make([]string, 0, len(roots))
@@ -178,6 +230,7 @@ func (s *Server) cacheRootFor(clientCacheDir, fallbackName string) string {
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
 func (s *Server) capabilities(_ context.Context, w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, transcoder.Capabilities())
 }
@@ -568,7 +621,7 @@ func (s *Server) listSessions(_ context.Context, w http.ResponseWriter, _ *http.
 	writeJSON(w, http.StatusOK, s.jobs.List())
 }
 func (s *Server) getSession(_ context.Context, w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := routeParam(r, "id")
 	j, ok := s.jobs.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("session not found"))
@@ -577,14 +630,14 @@ func (s *Server) getSession(_ context.Context, w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, j)
 }
 func (s *Server) cancelSession(_ context.Context, w http.ResponseWriter, r *http.Request) {
-	if !s.jobs.Cancel(r.PathValue("id")) {
+	if !s.jobs.Cancel(routeParam(r, "id")) {
 		writeError(w, http.StatusNotFound, errors.New("session not found"))
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancel_requested"})
 }
 func (s *Server) sessionEvents(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := routeParam(r, "id")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, errors.New("streaming unsupported"))

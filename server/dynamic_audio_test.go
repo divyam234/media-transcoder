@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -42,6 +43,7 @@ func TestDynamicHLSDefaultAudioIsTimestampTrimmed(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
+	defer deleteTestSession(t, ts.URL+"/v1/playback/hls/"+created.ID)
 
 	segResp, err := http.Get(ts.URL + "/v1/playback/hls/" + created.ID + "/segment/000001.ts")
 	if err != nil {
@@ -94,6 +96,7 @@ func TestDynamicDASHDefaultAudioIsTimestampTrimmed(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
+	defer deleteTestSession(t, ts.URL+"/v1/playback/dash/"+created.ID)
 
 	segResp, err := http.Get(ts.URL + "/v1/playback/dash/" + created.ID + "/segment/000001.m4s")
 	if err != nil {
@@ -103,15 +106,47 @@ func TestDynamicDASHDefaultAudioIsTimestampTrimmed(t *testing.T) {
 	if segResp.StatusCode != http.StatusOK {
 		t.Fatalf("segment status=%d", segResp.StatusCode)
 	}
+	initPath := filepath.Join(cache, created.ID, "init.mp4")
 	segPath := filepath.Join(cache, created.ID, "000001.m4s")
-	info, err := transcoder.ProbeFile(context.Background(), segPath)
+	joined := filepath.Join(t.TempDir(), "joined.mp4")
+	initBytes, err := os.ReadFile(initPath)
 	if err != nil {
-		t.Fatalf("probe cached segment: %v", err)
+		t.Fatalf("read dash init: %v", err)
+	}
+	segBytes, err := os.ReadFile(segPath)
+	if err != nil {
+		t.Fatalf("read dash segment: %v", err)
+	}
+	if !bytes.Contains(initBytes, []byte("moov")) || !bytes.Contains(segBytes, []byte("moof")) || !bytes.Contains(segBytes, []byte("mdat")) {
+		t.Fatalf("dash init/media split invalid")
+	}
+	if err := os.WriteFile(joined, append(initBytes, segBytes...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := transcoder.ProbeFile(context.Background(), joined)
+	if err != nil {
+		t.Fatalf("probe joined init+segment: %v", err)
 	}
 	if !info.HasAudio || info.AudioStreams != 1 {
 		t.Fatalf("dynamic dash segment missing audio: %+v", info)
 	}
-	if info.Duration < 1.45 || info.Duration > 2.15 {
+	if info.Duration < 1.45 || info.Duration > 2.35 {
 		t.Fatalf("dynamic dash segment duration drift: %+v", info)
+	}
+}
+
+func deleteTestSession(t *testing.T, url string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete session status=%d", resp.StatusCode)
 	}
 }

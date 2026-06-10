@@ -224,7 +224,8 @@ static int drain_filter_to_encoder(
     AVFrame *filt_frame,
     int64_t *first_pts,
     int64_t *last_pts,
-    int64_t *fallback_pts
+    int64_t *fallback_pts,
+    int64_t pts_offset
 ) {
     int ret = 0;
     while ((ret = av_buffersink_get_frame(sink_ctx, filt_frame)) >= 0) {
@@ -235,6 +236,7 @@ static int drain_filter_to_encoder(
         } else {
             out_pts = (*fallback_pts)++;
         }
+        out_pts += pts_offset;
         if (*last_pts != AV_NOPTS_VALUE && out_pts <= *last_pts) out_pts = *last_pts + 1;
         filt_frame->pts = out_pts;
         filt_frame->duration = 1;
@@ -416,11 +418,11 @@ static int init_audio_filter(
 
     double end_time = duration_limit > 0.0 ? start_time + duration_limit : 0.0;
     if (duration_limit > 0.0) {
-        snprintf(filter_descr, sizeof(filter_descr), "atrim=start=%.9f:end=%.9f,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=%d:channel_layouts=stereo,asetnsamples=n=%d:p=1", start_time, end_time, aenc->sample_rate, aenc->frame_size > 0 ? aenc->frame_size : 1024);
+        snprintf(filter_descr, sizeof(filter_descr), "atrim=start=%.9f:end=%.9f,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=%d:channel_layouts=stereo,asetnsamples=n=%d:p=0", start_time, end_time, aenc->sample_rate, aenc->frame_size > 0 ? aenc->frame_size : 1024);
     } else if (start_time > 0.0) {
-        snprintf(filter_descr, sizeof(filter_descr), "atrim=start=%.9f,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=%d:channel_layouts=stereo,asetnsamples=n=%d:p=1", start_time, aenc->sample_rate, aenc->frame_size > 0 ? aenc->frame_size : 1024);
+        snprintf(filter_descr, sizeof(filter_descr), "atrim=start=%.9f,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=%d:channel_layouts=stereo,asetnsamples=n=%d:p=0", start_time, aenc->sample_rate, aenc->frame_size > 0 ? aenc->frame_size : 1024);
     } else {
-        snprintf(filter_descr, sizeof(filter_descr), "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=%d:channel_layouts=stereo,asetnsamples=n=%d:p=1", aenc->sample_rate, aenc->frame_size > 0 ? aenc->frame_size : 1024);
+        snprintf(filter_descr, sizeof(filter_descr), "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=%d:channel_layouts=stereo,asetnsamples=n=%d:p=0", aenc->sample_rate, aenc->frame_size > 0 ? aenc->frame_size : 1024);
     }
 
     outputs->name = av_strdup("in"); outputs->filter_ctx = src_ctx; outputs->pad_idx = 0; outputs->next = NULL;
@@ -447,16 +449,17 @@ static int drain_audio_filter_to_encoder(
     AVStream *out_st,
     AVPacket *pkt,
     AVFrame *filt_frame,
-    int64_t *last_pts
+    int64_t *last_pts,
+    int64_t pts_offset
 ) {
     int ret = 0;
     while ((ret = av_buffersink_get_frame(sink_ctx, filt_frame)) >= 0) {
         if (filt_frame->pts != AV_NOPTS_VALUE) {
-            int64_t pts = av_rescale_q(filt_frame->pts, sink_tb, aenc->time_base);
+            int64_t pts = av_rescale_q(filt_frame->pts, sink_tb, aenc->time_base) + pts_offset;
             if (*last_pts != AV_NOPTS_VALUE && pts <= *last_pts) pts = *last_pts + filt_frame->nb_samples;
             filt_frame->pts = pts;
         } else {
-            filt_frame->pts = (*last_pts == AV_NOPTS_VALUE) ? 0 : *last_pts + filt_frame->nb_samples;
+            filt_frame->pts = (*last_pts == AV_NOPTS_VALUE) ? pts_offset : *last_pts + filt_frame->nb_samples;
         }
         *last_pts = filt_frame->pts;
         ret = encode_audio_frame(ofmt, aenc, out_st, pkt, filt_frame);
@@ -485,6 +488,7 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     double start_time = (opts && opts->start_time > 0.0) ? opts->start_time : 0.0;
     double duration_limit = (opts && opts->duration > 0.0) ? opts->duration : 0.0;
     double end_time = duration_limit > 0.0 ? start_time + duration_limit : 0.0;
+    double timestamp_offset = (opts && opts->timestamp_offset > 0.0) ? opts->timestamp_offset : 0.0;
 
     if (start_time > 0.0) {
         int64_t seek_ts = av_rescale_q((int64_t)llround(start_time * (double)AV_TIME_BASE), AV_TIME_BASE_Q, dec->stream->time_base);
@@ -578,6 +582,23 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     if (ret < 0) { set_av_error("avcodec_parameters_from_context", ret); if (audio_filter_graph) avfilter_graph_free(&audio_filter_graph); if (aenc) avcodec_free_context(&aenc); avcodec_free_context(&enc); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return ret; }
     out_st->time_base = enc->time_base;
 
+    int64_t video_pts_offset = 0;
+    if (timestamp_offset > 0.0) {
+        video_pts_offset = av_rescale_q((int64_t)llround(timestamp_offset * (double)AV_TIME_BASE), AV_TIME_BASE_Q, enc->time_base);
+        if (video_pts_offset < 0) video_pts_offset = 0;
+    }
+    int64_t audio_pts_offset = 0;
+    if (want_audio && aenc) {
+        if (timestamp_offset > 0.0) {
+            audio_pts_offset = av_rescale_q((int64_t)llround(timestamp_offset * (double)AV_TIME_BASE), AV_TIME_BASE_Q, aenc->time_base);
+            if (audio_pts_offset < 0) audio_pts_offset = 0;
+        }
+        // AAC encoders normally emit priming-delay packets with negative PTS.
+        // Offset by one encoder frame for independently generated HLS/DASH
+        // windows so adjacent segment audio DTS stays monotonic.
+        if (duration_limit > 0.0 && aenc->frame_size > 0) audio_pts_offset += aenc->frame_size;
+    }
+
     if (!(ofmt->oformat->flags & AVFMT_NOFILE)) {
         ret = avio_open(&ofmt->pb, output_path, AVIO_FLAG_WRITE);
         if (ret < 0) { set_av_error("avio_open", ret); if (audio_filter_graph) avfilter_graph_free(&audio_filter_graph); if (aenc) avcodec_free_context(&aenc); avcodec_free_context(&enc); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return ret; }
@@ -617,7 +638,7 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
                 av_frame_unref(dec->audio_frame);
                 if (ret == AVERROR_EOF) { audio_done = 1; break; }
                 if (ret < 0) { set_av_error("audio av_buffersrc_add_frame", ret); goto fail; }
-                ret = drain_audio_filter_to_encoder(audio_sink_ctx, audio_sink_tb, ofmt, aenc, audio_out_st, audio_enc_pkt, audio_filt_frame, &audio_last_pts);
+                ret = drain_audio_filter_to_encoder(audio_sink_ctx, audio_sink_tb, ofmt, aenc, audio_out_st, audio_enc_pkt, audio_filt_frame, &audio_last_pts, audio_pts_offset);
                 if (ret < 0) goto fail;
             }
             if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) { set_av_error("avcodec_receive_frame audio", ret); goto fail; }
@@ -638,7 +659,7 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
             ret = av_buffersrc_add_frame_flags(src_ctx, dec->frame, AV_BUFFERSRC_FLAG_KEEP_REF);
             av_frame_unref(dec->frame);
             if (ret < 0) { set_av_error("av_buffersrc_add_frame", ret); goto fail; }
-            ret = drain_filter_to_encoder(sink_ctx, sink_tb, ofmt, enc, out_st, enc_pkt, filt_frame, &first_filter_pts, &last_out_pts, &fallback_pts);
+            ret = drain_filter_to_encoder(sink_ctx, sink_tb, ofmt, enc, out_st, enc_pkt, filt_frame, &first_filter_pts, &last_out_pts, &fallback_pts, video_pts_offset);
             if (ret < 0) goto fail;
         }
         if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) { set_av_error("avcodec_receive_frame", ret); goto fail; }
@@ -654,7 +675,7 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
             ret = av_buffersrc_add_frame_flags(src_ctx, dec->frame, AV_BUFFERSRC_FLAG_KEEP_REF);
             av_frame_unref(dec->frame);
             if (ret < 0) { set_av_error("flush av_buffersrc_add_frame", ret); goto fail; }
-            ret = drain_filter_to_encoder(sink_ctx, sink_tb, ofmt, enc, out_st, enc_pkt, filt_frame, &first_filter_pts, &last_out_pts, &fallback_pts);
+            ret = drain_filter_to_encoder(sink_ctx, sink_tb, ofmt, enc, out_st, enc_pkt, filt_frame, &first_filter_pts, &last_out_pts, &fallback_pts, video_pts_offset);
             if (ret < 0) goto fail;
         }
         if (ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) { set_av_error("flush avcodec_receive_frame", ret); goto fail; }
@@ -662,7 +683,7 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     if (tc_cancelled(opts)) { ret = AVERROR_EXIT; set_error("transcode cancelled"); goto fail; }
     ret = av_buffersrc_add_frame_flags(src_ctx, NULL, 0);
     if (ret < 0) { set_av_error("filter flush NULL", ret); goto fail; }
-    ret = drain_filter_to_encoder(sink_ctx, sink_tb, ofmt, enc, out_st, enc_pkt, filt_frame, &first_filter_pts, &last_out_pts, &fallback_pts);
+    ret = drain_filter_to_encoder(sink_ctx, sink_tb, ofmt, enc, out_st, enc_pkt, filt_frame, &first_filter_pts, &last_out_pts, &fallback_pts, video_pts_offset);
     if (ret < 0) goto fail;
     ret = encode_video_frame(ofmt, enc, out_st, enc_pkt, NULL);
     if (ret < 0) goto fail;
@@ -675,7 +696,7 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
                 ret = av_buffersrc_add_frame_flags(audio_src_ctx, dec->audio_frame, AV_BUFFERSRC_FLAG_KEEP_REF);
                 av_frame_unref(dec->audio_frame);
                 if (ret < 0) { set_av_error("flush audio av_buffersrc_add_frame", ret); goto fail; }
-                ret = drain_audio_filter_to_encoder(audio_sink_ctx, audio_sink_tb, ofmt, aenc, audio_out_st, audio_enc_pkt, audio_filt_frame, &audio_last_pts);
+                ret = drain_audio_filter_to_encoder(audio_sink_ctx, audio_sink_tb, ofmt, aenc, audio_out_st, audio_enc_pkt, audio_filt_frame, &audio_last_pts, audio_pts_offset);
                 if (ret < 0) goto fail;
             }
             if (ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) { set_av_error("flush avcodec_receive_frame audio", ret); goto fail; }
@@ -684,7 +705,7 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
             ret = av_buffersrc_add_frame_flags(audio_src_ctx, NULL, 0);
             if (ret < 0 && ret != AVERROR_EOF) { set_av_error("audio filter flush NULL", ret); goto fail; }
         }
-        ret = drain_audio_filter_to_encoder(audio_sink_ctx, audio_sink_tb, ofmt, aenc, audio_out_st, audio_enc_pkt, audio_filt_frame, &audio_last_pts);
+        ret = drain_audio_filter_to_encoder(audio_sink_ctx, audio_sink_tb, ofmt, aenc, audio_out_st, audio_enc_pkt, audio_filt_frame, &audio_last_pts, audio_pts_offset);
         if (ret < 0) goto fail;
         ret = encode_audio_frame(ofmt, aenc, audio_out_st, audio_enc_pkt, NULL);
         if (ret < 0) goto fail;
