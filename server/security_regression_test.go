@@ -68,7 +68,7 @@ func TestCacheRootOverridesClientCacheDir(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("segment status=%d", resp.StatusCode)
 	}
-	serverFiles, err := filepath.Glob(filepath.Join(serverCache, "go-media-transcoder-hls", created.ID, "*.ts"))
+	serverFiles, err := filepath.Glob(filepath.Join(serverCache, "media-transcoder-hls", created.ID, "*.ts"))
 	if err != nil {
 		t.Fatal(err)
 	}

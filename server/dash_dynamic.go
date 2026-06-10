@@ -128,7 +128,7 @@ func (s *Server) createDynamicDASHSession(ctx context.Context, w http.ResponseWr
 		}
 	}
 	id := newID()
-	cacheRoot := s.cacheRootFor(req.CacheDir, "go-media-transcoder-dash")
+	cacheRoot := s.cacheRootFor(req.CacheDir, "media-transcoder-dash")
 	cacheDir := filepath.Join(cacheRoot, id)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, err)

@@ -150,7 +150,7 @@ func (s *Server) createDynamicHLSSession(ctx context.Context, w http.ResponseWri
 		}
 	}
 	id := newID()
-	cacheRoot := s.cacheRootFor(req.CacheDir, "go-media-transcoder-hls")
+	cacheRoot := s.cacheRootFor(req.CacheDir, "media-transcoder-hls")
 	cacheDir := filepath.Join(cacheRoot, id)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, err)

@@ -1,12 +1,8 @@
-# go-media-transcoder
+# media-transcoder
 
 Dynamic Go media playback server built on FFmpeg shared libraries through cgo.
 
-This project is intentionally separate from the thumbnail/sprite/previewer project. It does not contain sprite, preview slicing, VTT, or pHash code.
-
 ## Runtime contract
-
-Runtime code does **not** spawn `ffmpeg` or `ffprobe`.
 
 The implementation calls FFmpeg libraries directly:
 
@@ -15,19 +11,13 @@ The implementation calls FFmpeg libraries directly:
 - `libavutil`
 - `libavfilter`
 
-`os/exec` is forbidden in runtime code and covered by a test.
+## Architecture
 
-## Important architecture
-
-This server is now a **dynamic playback origin**, not a static transcoder.
-
-It does **not** expose endpoints that transcode an entire file to a fixed output path before playback. Instead:
-
-1. A playback session stores input metadata, profile, and cache location.
-2. HLS playlists and DASH manifests are virtual and returned immediately.
-3. Individual media segments are generated only when the browser/player requests them.
-4. Seeking works by requesting the segment at the target timeline position.
-5. Generated segments are cached and reused.
+1. Playback session stores input metadata, profile, and cache location
+2. HLS/DASH manifests are virtual — returned immediately
+3. Media segments generated on demand at request time
+4. Seeking requests the segment at the target timeline position
+5. Generated segments are cached and reused
 
 ## Build
 
@@ -47,7 +37,7 @@ export CGO_LDFLAGS="-Wl,--disable-new-dtags -Wl,-rpath,$FFMPEG_PREFIX/lib"
   --request-timeout 30m \
   --max-jobs 2 \
   --rate-limit 120 \
-  --cache-root /var/cache/go-media-transcoder \
+  --cache-root /var/cache/media-transcoder \
   --allow-input-root /srv/media \
   --api-keys secret1,secret2
 ```
@@ -74,7 +64,7 @@ GET /v1/capabilities
 GET /v1/metrics
 ```
 
-Capabilities explicitly report:
+Capabilities report:
 
 ```json
 {
@@ -139,8 +129,6 @@ Response:
 }
 ```
 
-No media segments are generated during session creation.
-
 ### HLS URLs
 
 ```txt
@@ -150,18 +138,17 @@ GET    /v1/playback/hls/{id}/segment/{index}.ts
 DELETE /v1/playback/hls/{id}
 ```
 
-`video.m3u8` is a virtual VOD timeline. When the player seeks, it requests a segment URL. The server maps:
+`video.m3u8` is a virtual VOD timeline. Segment URL maps to:
 
 ```txt
 segment index -> start time = index * segment_seconds
 ```
 
-Then it seeks the input with direct libav, transcodes only that segment window, caches it, and serves it. `DELETE /v1/playback/hls/{id}` cancels the session context, removes its cache directory, and releases per-segment lock bookkeeping.
+Server seeks input via libav, transcodes that segment window, caches it, and serves it. `DELETE /v1/playback/hls/{id}` cancels the session context, removes its cache directory, and releases per-segment lock bookkeeping.
 
 ### Dynamic ABR HLS
 
-A session may expose multiple HLS variants without generating any media at creation time.
-The master playlist points to variant playlists, and only the requested variant segment is generated.
+Multiple HLS variants without generating media at creation time. Master playlist points to variant playlists; only the requested variant segment is generated.
 
 ```json
 {
@@ -202,17 +189,17 @@ GET /v1/playback/hls/{id}/variant/720p/segment/{index}.ts
 
 Requesting a `720p` segment does not generate the `360p` segment. Each variant has its own cache namespace.
 
-### Production safety knobs
+### Production safety
 
 Server flags:
 
 ```txt
---cache-root /var/cache/go-media-transcoder
+--cache-root /var/cache/media-transcoder
 --allow-input-root /srv/media
 --allow-input-root /mnt/library
 ```
 
-When `--cache-root` is set, client-provided `cache_dir` is ignored and all dynamic segment cache files stay under the server-owned root. When one or more `--allow-input-root` values are set, `input_path` outside those roots is rejected with `403`.
+With `--cache-root`, client-provided `cache_dir` is ignored — all segment cache files stay under the server-owned root. With `--allow-input-root`, `input_path` outside those roots is rejected with `403`.
 
 ### Metrics
 
@@ -266,11 +253,9 @@ GET    /v1/playback/dash/{id}/segment/{index}.m4s
 DELETE /v1/playback/dash/{id}
 ```
 
-The MPD is virtual. Segments are generated on demand as fragmented MP4 windows through direct libav. `DELETE /v1/playback/dash/{id}` cancels the session context, removes its cache directory, and releases per-segment lock bookkeeping.
+MPD is virtual. Segments generated on demand as fragmented MP4 windows. `DELETE /v1/playback/dash/{id}` cancels the session context, removes its cache directory, and releases per-segment lock bookkeeping.
 
-## Removed static server endpoints
-
-These are intentionally **not exposed** by the server anymore:
+## Removed static endpoints
 
 ```txt
 POST /v1/transcode/progressive
@@ -282,30 +267,21 @@ POST /v1/sessions
 GET  /v1/sessions
 ```
 
-The library still contains low-level direct-libav primitives used internally for segment generation, but the HTTP service is now dynamic playback only.
+Internal segment-generation primitives remain in the library, but the HTTP service is dynamic playback only.
 
 ## Audio
 
-Dynamic playback now supports timestamp-trimmed audio for arbitrary HLS/DASH segment requests.
+Timestamp-trimmed audio for arbitrary HLS/DASH segment requests.
 
-Supported modes:
+- `audio_mode: "skip"` — no audio
+- `audio_mode: "transcode"` — decode, trim to segment window with `atrim`, reset timestamps with `asetpts`, resample/format for AAC, mux into segment
+- omitted defaults to `"transcode"` when source has audio, otherwise `"skip"`
 
-- `audio_mode: "skip"` disables audio.
-- `audio_mode: "transcode"` decodes the selected input audio stream, trims it to the requested segment window with `atrim`, resets timestamps with `asetpts`, resamples/formats for AAC, and muxes it into the generated HLS/DASH segment.
-- omitted `audio_mode` now defaults to `"transcode"` for dynamic playback sessions when the source has audio, otherwise `"skip"`.
-
-Important production behavior:
-
-- arbitrary segment starts such as 17.37s are supported;
-- output segment audio starts at timestamp zero;
-- output duration stays bounded to the requested segment duration;
-- no packet-copy shortcut is used for arbitrary dynamic segments, because copy cannot sample-trim safely inside audio packets.
-
-The low-level API still accepts `audio_mode: "copy"` for compatibility, but dynamic playback uses transcoded AAC for timestamp-correct segments.
+Output audio starts at timestamp zero. Duration stays bounded to requested segment duration. No packet-copy — copy cannot sample-trim safely inside audio packets. `audio_mode: "copy"` accepted in low-level API for compatibility only.
 
 ## Hardware acceleration capabilities
 
-The planner still exposes hardware acceleration profiles:
+Hardware acceleration profiles:
 
 - `none`
 - `amf`
@@ -316,11 +292,9 @@ The planner still exposes hardware acceleration profiles:
 - `videotoolbox`
 - `rkmpp`
 
-Actual hardware execution requires host GPU/device support and an FFmpeg build exposing that encoder. Unsupported branches are rejected; the server never falls back to spawning `ffmpeg`.
+Hardware execution requires host GPU/device support and an FFmpeg build exposing that encoder. Unsupported branches are rejected.
 
-## Explicitly not implemented
-
-Per current scope:
+## Not implemented
 
 - subtitles: burn-in, extract, embed
 - WebSockets
@@ -333,11 +307,9 @@ go test ./... -count=1
 go test -race ./... -count=1
 ```
 
-The schema documents only the dynamic playback service surface: health, capabilities, probe, device planning, on-demand HLS, and on-demand DASH. Static transcode-to-output routes are intentionally absent.
-
 ## Runtime capability router
 
-The server exposes runtime-discovered FFmpeg/libav capability routes. These do **not** call `ffmpeg` or `ffprobe`; they enumerate the linked FFmpeg shared libraries directly through cgo.
+Runtime-discovered FFmpeg/libav capability routes. Enumerates the linked FFmpeg shared libraries directly through cgo.
 
 ```txt
 GET /v1/capabilities
@@ -346,7 +318,7 @@ GET /v1/capabilities/codecs
 GET /v1/capabilities/hardware
 ```
 
-`/v1/capabilities/runtime` returns the actual FFmpeg build information:
+`/v1/capabilities/runtime` returns FFmpeg build information:
 
 ```json
 {
@@ -398,11 +370,7 @@ GET /v1/capabilities/hardware
 }
 ```
 
-Important distinction:
-
-- `encoder_available_in_build` means the linked FFmpeg build contains that encoder.
-- `hw_device_type_in_build` means FFmpeg exposes that hardware device API, such as `cuda`, `vaapi`, or `qsv`.
-- `host_device_hint_available` is a best-effort host check, such as `/dev/dri/renderD128` or `/dev/nvidia0`.
-- `runnable_likely` is true only when build support and host hints both look usable.
-
-This avoids lying about hardware acceleration: a build can contain `h264_nvenc` but still fail at runtime on a host without NVIDIA hardware.
+- `encoder_available_in_build` — linked FFmpeg build contains that encoder
+- `hw_device_type_in_build` — FFmpeg exposes that hardware device API (`cuda`, `vaapi`, `qsv`, etc.)
+- `host_device_hint_available` — best-effort host check (`/dev/dri/renderD128`, `/dev/nvidia0`, etc.)
+- `runnable_likely` — true only when build support and host hints both look usable
