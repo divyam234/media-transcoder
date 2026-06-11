@@ -56,33 +56,6 @@ or:
 Authorization: Bearer secret1
 ```
 
-
-## Routing and CORS
-
-The HTTP service uses `github.com/go-chi/chi/v5` for routing and middleware. Dynamic route parameters are handled through chi URL params, so routes like `/v1/playback/hls/{id}/segment/{name}` are independent of Go stdlib ServeMux pattern behavior.
-
-CORS is enabled through `github.com/go-chi/cors`. Preflight `OPTIONS` requests are handled before auth/rate limiting, which is required for browser players and generated clients.
-
-Default CORS behavior allows public playback during development:
-
-```bash
---cors-origins "*"
-```
-
-For production, prefer explicit origins:
-
-```bash
---cors-origins "https://app.example.com,https://player.example.com"
-```
-
-If you enable credentialed browser requests, do not use wildcard origins:
-
-```bash
---cors-origins "https://app.example.com" --cors-credentials
-```
-
-Allowed request headers include `Authorization`, `Content-Type`, `Range`, and `X-API-Key`. Exposed response headers include `Accept-Ranges`, `Content-Length`, `Content-Range`, and `Content-Type`.
-
 ## HTTP API
 
 ### Health and capabilities
@@ -176,7 +149,6 @@ segment index -> start time = index * segment_seconds
 ```
 
 Server seeks input via libav, transcodes that segment window, caches it, and serves it. `DELETE /v1/playback/hls/{id}` cancels the session context, removes its cache directory, and releases per-segment lock bookkeeping.
-
 
 ### HLS fMP4/CMAF mode
 
@@ -442,7 +414,6 @@ GET /v1/capabilities/hardware
 - `host_device_hint_available` — best-effort host check (`/dev/dri/renderD128`, `/dev/nvidia0`, etc.)
 - `runnable_likely` — true only when build support and host hints both look usable
 
-
 ## Debugging playback
 
 Run with `--debug` to see dynamic playback events: session creation, playlist serving,
@@ -451,3 +422,150 @@ For difficult HEVC/10-bit sources, keep `--max-jobs` at `4` or higher and use
 `prewarm_segments` in the HLS session request so the next segments are generated
 before the player reaches them. The long-source regression uses a real HLS client
 to ensure playback does not hang on the first several segments.
+
+## Profile-driven playback and library URLs
+
+For production use, prefer a YAML config with libraries and playback profiles. A profile can define multiple variants, so one HLS master playlist or DASH MPD can expose several resolutions without creating multiple sessions.
+
+```yaml
+server:
+  addr: ":8080"
+  cache_root: "/var/cache/media-transcoder"
+  debug: true
+  max_jobs: 4
+  allow_input_roots:
+    - "/srv/media"
+
+libraries:
+  movies:
+    root: "/srv/media/movies"
+    allow_symlinks: false
+  tv:
+    root: "/srv/media/tv"
+    allow_symlinks: false
+
+profiles:
+  web-h264:
+    container: hls
+    segment_type: fmp4
+    segment_seconds: 4
+    audio:
+      mode: transcode
+      codec: aac
+      bitrate: 128000
+      channels: 2
+      sample_rate: 48000
+    video:
+      codec: h264
+      encoder_name: libx264
+      preset: veryfast
+      crf: 28
+      gop_size: 96
+      max_b_frames: 0
+    variants:
+      - name: 360p
+        width: 640
+        height: 360
+        video_bitrate: 900000
+        crf: 30
+      - name: 720p
+        width: 1280
+        height: 720
+        video_bitrate: 2800000
+        crf: 28
+
+  nvidia-h264:
+    container: hls
+    segment_type: fmp4
+    segment_seconds: 4
+    audio:
+      mode: transcode
+      codec: aac
+      bitrate: 128000
+      channels: 2
+    video:
+      codec: h264
+      encoder_name: h264_nvenc
+      preset: fast
+      crf: 30
+      gop_size: 96
+      max_b_frames: 0
+    variants:
+      - name: 720p
+        width: 1280
+        height: 720
+        video_bitrate: 2800000
+      - name: 1080p
+        width: 1920
+        height: 1080
+        video_bitrate: 5000000
+```
+
+Run with config:
+
+```bash
+./transcode-server --config ./transcoder.yaml
+```
+
+Config routes:
+
+```txt
+GET  /v1/profiles
+GET  /v1/profiles/{id}
+GET  /v1/libraries
+GET  /v1/libraries/{id}
+POST /v1/admin/reload
+```
+
+`POST /v1/admin/reload` reloads the YAML profile/library section without restarting the process.
+
+### HLS library playback URLs
+
+Library playback URLs auto-create and reuse an internal dynamic session. The session key includes library, relative path, file size/mtime, and profile hash, so changing the media file or profile creates a fresh cache namespace.
+
+```txt
+GET /play/hls/{profile}/{library}/{path...}/master.m3u8
+GET /play/hls/{profile}/{library}/{path...}/variant/{variant}/video.m3u8
+GET /play/hls/{profile}/{library}/{path...}/variant/{variant}/segment/init.mp4
+GET /play/hls/{profile}/{library}/{path...}/variant/{variant}/segment/{index}.m4s
+GET /play/hls/{profile}/{library}/{path...}/variant/{variant}/segment/{index}.ts
+```
+
+Example:
+
+```txt
+http://localhost:8080/play/hls/web-h264/tv/House.of.the.Dragon/S02E07.mkv/master.m3u8
+```
+
+The master playlist contains every configured profile variant:
+
+```m3u8
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-INDEPENDENT-SEGMENTS
+#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=640x360,CODECS="avc1.64001f,mp4a.40.2"
+variant/360p/video.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2"
+variant/720p/video.m3u8
+```
+
+### DASH library playback URLs
+
+DASH uses the same profiles and variants:
+
+```txt
+GET /play/dash/{profile}/{library}/{path...}/manifest.mpd
+GET /play/dash/{profile}/{library}/{path...}/variant/{variant}/segment/init.mp4
+GET /play/dash/{profile}/{library}/{path...}/variant/{variant}/segment/{index}.m4s
+```
+
+The MPD contains one `Representation` per variant and each representation has its own init segment and media fragment URLs.
+
+### Library path safety
+
+Library URLs never resolve arbitrary absolute paths. The server maps `{library}/{path...}` to a configured root and rejects:
+
+- `..` traversal
+- absolute paths
+- paths that escape the configured root
+- symlink escapes when `allow_symlinks: false`

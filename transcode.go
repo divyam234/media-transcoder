@@ -33,7 +33,7 @@ type TranscodeOptions struct {
 	// Color/HDR planning knobs. The direct software bridge accepts them as stable
 	// API fields; hardware tone-map execution is guarded by BuildPlan capability
 	// checks until device-specific contexts are available.
-	ToneMap      ToneMapOptions `json:"tone_map"`
+	ToneMap      ToneMapOptions `json:"tone_map,omitempty"`
 	VideoBitrate int            `json:"video_bitrate,omitempty"`
 
 	// StartTime and Duration are used by dynamic/on-demand playback paths.

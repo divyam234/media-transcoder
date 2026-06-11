@@ -37,6 +37,9 @@ type Config struct {
 	// AllowedInputRoots restricts input_path to these roots. Empty means allow any path.
 	AllowedInputRoots []string
 	CORS              CORSConfig
+	ConfigPath        string
+	Libraries         map[string]LibraryConfig
+	Profiles          map[string]PlaybackProfile
 }
 
 // CORSConfig controls browser access to the dynamic playback API.
@@ -62,6 +65,11 @@ type Server struct {
 	metrics           *Metrics
 	cacheRoot         string
 	allowedInputRoots []string
+	configPath        string
+	libraries         map[string]LibraryConfig
+	profiles          map[string]PlaybackProfile
+	configMu          sync.RWMutex
+	sessionMu         sync.Mutex
 }
 
 func New(cfg Config) *Server {
@@ -74,7 +82,7 @@ func New(cfg Config) *Server {
 	if cfg.MaxConcurrentJobs <= 0 {
 		cfg.MaxConcurrentJobs = 4
 	}
-	s := &Server{router: chi.NewRouter(), logger: cfg.Logger, timeout: cfg.RequestTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots)}
+	s := &Server{router: chi.NewRouter(), logger: cfg.Logger, timeout: cfg.RequestTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots), configPath: cfg.ConfigPath, libraries: normalizeLibraries(cfg.Libraries), profiles: normalizeProfiles(cfg.Profiles)}
 	s.routes(cfg.CORS)
 	return s
 }
@@ -84,7 +92,6 @@ func (s *Server) Handler() http.Handler { return s.router }
 func (s *Server) routes(corsCfg CORSConfig) {
 	r := s.router
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(normalizeCORS(corsCfg)))
 
@@ -98,6 +105,13 @@ func (s *Server) routes(corsCfg CORSConfig) {
 		r.Get("/v1/metrics", s.withTimeout(s.metricsHandler))
 		r.Post("/v1/probe", s.withTimeout(s.probe))
 		r.Post("/v1/plan/device", s.withTimeout(s.devicePlan))
+		r.Get("/v1/profiles", s.withTimeout(s.listProfiles))
+		r.Get("/v1/profiles/{id}", s.withTimeout(s.getProfile))
+		r.Get("/v1/libraries", s.withTimeout(s.listLibraries))
+		r.Get("/v1/libraries/{id}", s.withTimeout(s.getLibrary))
+		r.Post("/v1/admin/reload", s.withTimeout(s.reloadConfig))
+		r.Get("/play/hls/{profile}/{library}/*", s.withTimeout(s.libraryHLS))
+		r.Get("/play/dash/{profile}/{library}/*", s.withTimeout(s.libraryDASH))
 		// Dynamic playback origin endpoints only. This service intentionally does not
 		// expose static "transcode-to-output" routes; playlists/manifests are virtual
 		// and media segments are generated on demand by direct libav seeking.
@@ -112,6 +126,7 @@ func (s *Server) routes(corsCfg CORSConfig) {
 		r.Post("/v1/playback/dash/sessions", s.withTimeout(s.createDynamicDASHSession))
 		r.Get("/v1/playback/dash/{id}/manifest.mpd", s.withTimeout(s.dynamicDASHManifest))
 		r.Get("/v1/playback/dash/{id}/segment/{name}", s.withTimeout(s.dynamicDASHSegment))
+		r.Get("/v1/playback/dash/{id}/variant/{variant}/segment/{name}", s.withTimeout(s.dynamicDASHNamedVariantSegment))
 		r.Delete("/v1/playback/dash/{id}", s.withTimeout(s.deleteDynamicDASHSession))
 	})
 }
@@ -717,4 +732,32 @@ func (r *rateLimiter) Allow(key string) bool {
 	b.count++
 	r.buckets[key] = b
 	return true
+}
+
+func normalizeLibraries(in map[string]LibraryConfig) map[string]LibraryConfig {
+	out := map[string]LibraryConfig{}
+	for id, lib := range in {
+		if id == "" || lib.Root == "" {
+			continue
+		}
+		lib.ID = id
+		if abs, err := filepath.Abs(lib.Root); err == nil {
+			lib.Root = filepath.Clean(abs)
+		}
+		out[id] = lib
+	}
+	return out
+}
+
+func normalizeProfiles(in map[string]PlaybackProfile) map[string]PlaybackProfile {
+	out := map[string]PlaybackProfile{}
+	for id, p := range in {
+		if id == "" {
+			continue
+		}
+		p.ID = id
+		applyProfileDefaults(&p)
+		out[id] = p
+	}
+	return out
 }

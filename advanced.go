@@ -58,13 +58,13 @@ func TranscodeDASHFromFile(ctx context.Context, path, mpdPath string, opts DASHO
 }
 
 type LadderVariant struct {
-	Name         string  `json:"name"`
-	Width        int     `json:"width"`
-	Height       int     `json:"height,omitempty"`
-	VideoBitrate int     `json:"video_bitrate,omitempty"`
-	AudioBitrate int     `json:"audio_bitrate,omitempty"`
-	FPS          float64 `json:"fps,omitempty"`
-	CRF          int     `json:"crf,omitempty"`
+	Name         string  `json:"name" yaml:"name"`
+	Width        int     `json:"width" yaml:"width"`
+	Height       int     `json:"height,omitempty" yaml:"height,omitempty"`
+	VideoBitrate int     `json:"video_bitrate,omitempty" yaml:"video_bitrate,omitempty"`
+	AudioBitrate int     `json:"audio_bitrate,omitempty" yaml:"audio_bitrate,omitempty"`
+	FPS          float64 `json:"fps,omitempty" yaml:"fps,omitempty"`
+	CRF          int     `json:"crf,omitempty" yaml:"crf,omitempty"`
 }
 
 type ABRHLSOptions struct {

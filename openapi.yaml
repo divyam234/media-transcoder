@@ -303,6 +303,139 @@ paths:
       responses:
         "204":
           description: Session deleted
+  /v1/profiles:
+    get:
+      summary: List configured playback profiles
+      responses:
+        "200":
+          description: Playback profiles loaded from YAML/server config
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PlaybackProfile"
+  /v1/profiles/{id}:
+    get:
+      summary: Get a configured playback profile
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Playback profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackProfile"
+  /v1/libraries:
+    get:
+      summary: List configured media libraries
+      responses:
+        "200":
+          description: Media libraries loaded from YAML/server config
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Library"
+  /v1/libraries/{id}:
+    get:
+      summary: Get a configured media library
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Media library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Library"
+  /v1/admin/reload:
+    post:
+      summary: Reload YAML profile/library configuration
+      responses:
+        "200":
+          description: Reload result
+          content:
+            application/json:
+              schema:
+                type: object
+  /play/hls/{profile}/{library}/{path}/master.m3u8:
+    get:
+      summary: Auto-session HLS master playlist for a library item/profile
+      parameters:
+        - { name: profile, in: path, required: true, schema: { type: string } }
+        - { name: library, in: path, required: true, schema: { type: string } }
+        - { name: path, in: path, required: true, schema: { type: string }, description: Relative media path inside the library }
+      responses:
+        "200":
+          description: HLS master playlist with every profile variant
+          content:
+            application/vnd.apple.mpegurl:
+              schema: { type: string }
+  /play/hls/{profile}/{library}/{path}/variant/{variant}/video.m3u8:
+    get:
+      summary: Auto-session HLS media playlist for one variant
+      parameters:
+        - { name: profile, in: path, required: true, schema: { type: string } }
+        - { name: library, in: path, required: true, schema: { type: string } }
+        - { name: path, in: path, required: true, schema: { type: string } }
+        - { name: variant, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: HLS variant media playlist
+          content:
+            application/vnd.apple.mpegurl:
+              schema: { type: string }
+  /play/hls/{profile}/{library}/{path}/variant/{variant}/segment/{name}:
+    get:
+      summary: Auto-session HLS on-demand segment or init map for one variant
+      parameters:
+        - { name: profile, in: path, required: true, schema: { type: string } }
+        - { name: library, in: path, required: true, schema: { type: string } }
+        - { name: path, in: path, required: true, schema: { type: string } }
+        - { name: variant, in: path, required: true, schema: { type: string } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: HLS media segment
+          content:
+            video/mp4: { schema: { type: string, format: binary } }
+            video/mp2t: { schema: { type: string, format: binary } }
+  /play/dash/{profile}/{library}/{path}/manifest.mpd:
+    get:
+      summary: Auto-session DASH MPD for a library item/profile
+      parameters:
+        - { name: profile, in: path, required: true, schema: { type: string } }
+        - { name: library, in: path, required: true, schema: { type: string } }
+        - { name: path, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: DASH MPD with every profile representation
+          content:
+            application/dash+xml:
+              schema: { type: string }
+  /play/dash/{profile}/{library}/{path}/variant/{variant}/segment/{name}:
+    get:
+      summary: Auto-session DASH on-demand fMP4 segment/init for one variant
+      parameters:
+        - { name: profile, in: path, required: true, schema: { type: string } }
+        - { name: library, in: path, required: true, schema: { type: string } }
+        - { name: path, in: path, required: true, schema: { type: string } }
+        - { name: variant, in: path, required: true, schema: { type: string } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: DASH fMP4 init or media fragment
+          content:
+            video/mp4: { schema: { type: string, format: binary } }
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -320,6 +453,41 @@ components:
       schema:
         type: string
   schemas:
+    Library:
+      type: object
+      properties:
+        id: { type: string }
+        root: { type: string }
+        allow_symlinks: { type: boolean }
+    PlaybackProfile:
+      type: object
+      properties:
+        id: { type: string }
+        container: { type: string, enum: [hls, dash] }
+        segment_type: { type: string, enum: [mpegts, fmp4] }
+        segment_seconds: { type: number }
+        audio:
+          type: object
+          properties:
+            mode: { type: string, enum: [skip, transcode, copy] }
+            codec: { type: string }
+            bitrate: { type: integer }
+            channels: { type: integer }
+            sample_rate: { type: integer }
+        video:
+          type: object
+          properties:
+            codec: { type: string }
+            encoder_name: { type: string }
+            preset: { type: string }
+            crf: { type: integer }
+            gop_size: { type: integer }
+            max_b_frames: { type: integer }
+            fps: { type: number }
+        variants:
+          type: array
+          items:
+            $ref: "#/components/schemas/LadderVariant"
     ErrorResponse:
       type: object
       properties:

@@ -181,8 +181,19 @@ func (s *Server) dynamicHLSMaster(_ context.Context, w http.ResponseWriter, r *h
 		writeError(w, http.StatusNotFound, errors.New("hls session not found"))
 		return
 	}
+	s.writeHLSMaster(w, sess)
+}
+
+func (s *Server) writeHLSMaster(w http.ResponseWriter, sess *DynamicHLSSession) {
+	body := buildHLSMasterPlaylist(sess)
+	s.logger.Debug("hls master served", "id", sess.ID, "variants", len(sess.Variants))
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	_, _ = w.Write([]byte(body))
+}
+
+func buildHLSMasterPlaylist(sess *DynamicHLSSession) string {
 	var b strings.Builder
-	b.WriteString("#EXTM3U\n#EXT-X-VERSION:6\n")
+	b.WriteString("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n")
 	vars := sess.Variants
 	if len(vars) == 0 {
 		vars = buildHLSVariants(sess.Options, nil, sess.Info)
@@ -192,12 +203,13 @@ func (s *Server) dynamicHLSMaster(_ context.Context, w http.ResponseWriter, r *h
 		if v.Name != "default" {
 			uri = "variant/" + url.PathEscape(v.Name) + "/video.m3u8"
 		}
-		b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d\n%s\n", v.Bandwidth, v.Width, v.Height, uri))
+		codecs := "avc1.64001f"
+		if v.Options.AudioMode != transcoder.AudioSkip && sess.Info.HasAudio {
+			codecs += ",mp4a.40.2"
+		}
+		b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\"\n%s\n", v.Bandwidth, v.Width, v.Height, codecs, uri))
 	}
-	body := b.String()
-	s.logger.Debug("hls master served", "id", id, "variants", len(vars))
-	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	_, _ = w.Write([]byte(body))
+	return b.String()
 }
 
 func (s *Server) deleteDynamicHLSSession(_ context.Context, w http.ResponseWriter, r *http.Request) {
@@ -641,10 +653,15 @@ func splitHLSFMP4(fullPath, initPath, mediaPath string) error {
 		return err
 	}
 	if st, err := os.Stat(initPath); err != nil || st.Size() == 0 {
-		if err := os.WriteFile(initPath+".tmp", data[:moof], 0o644); err != nil {
+		// Multiple segment prewarm workers for the same variant can race to create
+		// the shared fMP4 initialization section. Use a unique temp file instead of
+		// init.mp4.tmp so one worker cannot rename another worker's temp file.
+		tmpInit := fmt.Sprintf("%s.%d.%d.tmp", initPath, os.Getpid(), time.Now().UnixNano())
+		if err := os.WriteFile(tmpInit, data[:moof], 0o644); err != nil {
 			return err
 		}
-		if err := os.Rename(initPath+".tmp", initPath); err != nil {
+		if err := os.Rename(tmpInit, initPath); err != nil {
+			_ = os.Remove(tmpInit)
 			return err
 		}
 	}

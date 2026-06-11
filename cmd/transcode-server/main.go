@@ -31,6 +31,8 @@ func main() {
 	var debug bool
 	var corsOrigins string
 	var corsCredentials bool
+	var configPath string
+	pflag.StringVar(&configPath, "config", "", "YAML config file with libraries/profiles/server defaults")
 	pflag.StringVar(&addr, "addr", ":8080", "HTTP listen address")
 	pflag.DurationVar(&timeout, "request-timeout", 30*time.Minute, "per-request timeout")
 	pflag.StringVar(&apiKeys, "api-keys", "", "comma-separated API keys; empty disables auth")
@@ -49,12 +51,55 @@ func main() {
 	}
 
 	keys := splitCSV(apiKeys)
+	cfg := server.Config{RequestTimeout: timeout, APIKeys: keys, RateLimitPerMinute: rateLimit, MaxConcurrentJobs: maxJobs, CacheRoot: cacheRoot, AllowedInputRoots: allowedRoots, CORS: server.CORSConfig{AllowedOrigins: splitCSVDefault(corsOrigins, []string{"*"}), AllowCredentials: corsCredentials}}
+	if configPath != "" {
+		fileCfg, err := server.LoadConfigFile(configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "load config: %v\n", err)
+			os.Exit(1)
+		}
+		raw, _ := server.LoadPlaybackConfig(configPath)
+		cfg = fileCfg
+		if raw != nil {
+			if !pflag.CommandLine.Changed("addr") && raw.Server.Addr != "" {
+				addr = raw.Server.Addr
+			}
+			if !pflag.CommandLine.Changed("debug") {
+				debug = raw.Server.Debug
+			}
+		}
+		if pflag.CommandLine.Changed("request-timeout") {
+			cfg.RequestTimeout = timeout
+		}
+		if pflag.CommandLine.Changed("api-keys") {
+			cfg.APIKeys = keys
+		}
+		if pflag.CommandLine.Changed("rate-limit") {
+			cfg.RateLimitPerMinute = rateLimit
+		}
+		if pflag.CommandLine.Changed("max-jobs") {
+			cfg.MaxConcurrentJobs = maxJobs
+		}
+		if pflag.CommandLine.Changed("cache-root") {
+			cfg.CacheRoot = cacheRoot
+		}
+		if pflag.CommandLine.Changed("allow-input-root") {
+			cfg.AllowedInputRoots = allowedRoots
+		}
+		if pflag.CommandLine.Changed("cors-origins") {
+			cfg.CORS.AllowedOrigins = splitCSVDefault(corsOrigins, []string{"*"})
+		}
+		if pflag.CommandLine.Changed("cors-credentials") {
+			cfg.CORS.AllowCredentials = corsCredentials
+		}
+	}
 	level := slog.LevelInfo
 	if debug {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	h := server.New(server.Config{Logger: log, RequestTimeout: timeout, APIKeys: keys, RateLimitPerMinute: rateLimit, MaxConcurrentJobs: maxJobs, CacheRoot: cacheRoot, AllowedInputRoots: allowedRoots, CORS: server.CORSConfig{AllowedOrigins: splitCSVDefault(corsOrigins, []string{"*"}), AllowCredentials: corsCredentials}}).Handler()
+	cfg.Logger = log
+	h := server.New(cfg).Handler()
 	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 5 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
