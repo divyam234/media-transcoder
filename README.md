@@ -22,10 +22,8 @@ Requires Go 1.22+ and a FFmpeg 8.1 shared library build.
 
 ```bash
 export FFMPEG_PREFIX=/path/to/ffmpeg-8.1
-export PKG_CONFIG_PATH="$FFMPEG_PREFIX/lib/pkgconfig"
-export CGO_LDFLAGS="-Wl,--disable-new-dtags -Wl,-rpath,$FFMPEG_PREFIX/lib"
-
-./build.sh
+#You dont need to pass if ffmpeg is already in path
+make build
 ```
 
 ## Docker
@@ -170,7 +168,7 @@ This auto-creates an internal session keyed by library + relative path + file me
 
 ```bash
 # Build
-./build.sh
+make build
 
 # Run locally (debug mode)
 ./transcode-server --addr :8080 --allow-input-root /tmp/media --debug
