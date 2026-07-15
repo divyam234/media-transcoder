@@ -43,9 +43,10 @@ type FileServerConfig struct {
 }
 
 type LibraryConfig struct {
-	ID            string `yaml:"-" json:"id"`
-	VFS           string `yaml:"vfs,omitempty" json:"-"`
-	EncodedConfig string `yaml:"encoded_config,omitempty" json:"-"`
+	ID            string            `yaml:"-" json:"id"`
+	VFS           string            `yaml:"vfs,omitempty" json:"-"`
+	EncodedConfig string            `yaml:"encoded_config,omitempty" json:"-"`
+	Options       map[string]string `yaml:"options,omitempty" json:"-"`
 }
 
 type PlaybackProfile struct {
@@ -61,7 +62,7 @@ type PlaybackProfile struct {
 type AudioProfile struct {
 	Mode       transcoder.AudioMode `yaml:"mode" json:"mode"`
 	Codec      string               `yaml:"codec" json:"codec"`
-	Bitrate    int                  `yaml:"bitrate" json:"bitrate"`
+	Bitrate    transcoder.Bitrate   `yaml:"bitrate" json:"bitrate"`
 	Channels   int                  `yaml:"channels" json:"channels"`
 	SampleRate int                  `yaml:"sample_rate" json:"sample_rate"`
 }
@@ -190,7 +191,7 @@ func (p PlaybackProfile) HLSOptions() transcoder.HLSOptions {
 	o.PlaylistType = "vod"
 	o.AudioMode = p.Audio.Mode
 	o.AudioCodec = p.Audio.Codec
-	o.AudioBitrate = p.Audio.Bitrate
+	o.AudioBitrate = int(p.Audio.Bitrate)
 	o.AudioChannels = p.Audio.Channels
 	o.EncoderName = p.Video.EncoderName
 	o.HardwareDevice = p.Video.HardwareDevice

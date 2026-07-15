@@ -59,7 +59,7 @@ type libraryVFS struct {
 }
 
 func decodeLibraryVFSConfig(lib LibraryConfig) (encodedVFSConfig, error) {
-	cfg := encodedVFSConfig{VFS: strings.TrimSpace(lib.VFS)}
+	cfg := encodedVFSConfig{VFS: strings.TrimSpace(lib.VFS), Options: lib.Options}
 	if lib.EncodedConfig != "" {
 		raw, err := decodeBase64Config(lib.EncodedConfig)
 		if err != nil {

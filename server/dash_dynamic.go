@@ -450,7 +450,7 @@ func buildDASHVariants(base transcoder.DASHOptions, requested []transcoder.Ladde
 		if bw <= 0 {
 			bw = max(1, width) * 2200
 		}
-		return []DynamicDASHVariant{{Name: "default", Width: width, Height: height, Bandwidth: bw, Options: base}}
+		return []DynamicDASHVariant{{Name: "default", Width: width, Height: height, Bandwidth: int(bw), Options: base}}
 	}
 	out := make([]DynamicDASHVariant, 0, len(requested))
 	for _, rv := range requested {
@@ -478,10 +478,10 @@ func buildDASHVariants(base transcoder.DASHOptions, requested []transcoder.Ladde
 			opts.CRF = rv.CRF
 		}
 		if rv.VideoBitrate > 0 {
-			opts.VideoBitrate = rv.VideoBitrate
+			opts.VideoBitrate = int(rv.VideoBitrate)
 		}
 		if rv.AudioBitrate > 0 {
-			opts.AudioBitrate = rv.AudioBitrate
+			opts.AudioBitrate = int(rv.AudioBitrate)
 		}
 		width := opts.Width
 		if width <= 0 {
@@ -493,12 +493,12 @@ func buildDASHVariants(base transcoder.DASHOptions, requested []transcoder.Ladde
 		}
 		bw := rv.VideoBitrate + rv.AudioBitrate
 		if bw <= 0 {
-			bw = opts.VideoBitrate + opts.AudioBitrate
+			bw = transcoder.Bitrate(opts.VideoBitrate + opts.AudioBitrate)
 		}
 		if bw <= 0 {
-			bw = max(1, width) * 2200
+			bw = transcoder.Bitrate(max(1, width) * 2200)
 		}
-		out = append(out, DynamicDASHVariant{Name: name, Width: width, Height: height, Bandwidth: bw, Options: opts})
+		out = append(out, DynamicDASHVariant{Name: name, Width: width, Height: height, Bandwidth: int(bw), Options: opts})
 	}
 	return out
 }

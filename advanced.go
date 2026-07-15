@@ -61,8 +61,8 @@ type LadderVariant struct {
 	Name         string  `json:"name" yaml:"name"`
 	Width        int     `json:"width" yaml:"width"`
 	Height       int     `json:"height,omitempty" yaml:"height,omitempty"`
-	VideoBitrate int     `json:"video_bitrate,omitempty" yaml:"video_bitrate,omitempty"`
-	AudioBitrate int     `json:"audio_bitrate,omitempty" yaml:"audio_bitrate,omitempty"`
+	VideoBitrate Bitrate `json:"video_bitrate,omitempty" yaml:"video_bitrate,omitempty"`
+	AudioBitrate Bitrate `json:"audio_bitrate,omitempty" yaml:"audio_bitrate,omitempty"`
 	FPS          float64 `json:"fps,omitempty" yaml:"fps,omitempty"`
 	CRF          int     `json:"crf,omitempty" yaml:"crf,omitempty"`
 }
@@ -117,7 +117,7 @@ func TranscodeABRHLSFromFile(ctx context.Context, inputPath, masterPlaylist stri
 			hls.CRF = variant.CRF
 		}
 		if variant.AudioBitrate > 0 {
-			hls.AudioBitrate = variant.AudioBitrate
+			hls.AudioBitrate = int(variant.AudioBitrate)
 		}
 		if hls.AudioMode == "" {
 			hls.AudioMode = AudioCopy
@@ -146,7 +146,7 @@ func writeMasterPlaylist(path string, variants []ABRVariantResult) error {
 	for _, v := range variants {
 		bw := v.Variant.VideoBitrate + v.Variant.AudioBitrate
 		if bw <= 0 {
-			bw = v.Variant.Width * 2200
+			bw = Bitrate(v.Variant.Width * 2200)
 		}
 		res := ""
 		if v.Variant.Width > 0 && v.Variant.Height > 0 {

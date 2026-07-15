@@ -154,3 +154,19 @@ func TestPlaybackProfilePropagatesVAAPIDevice(t *testing.T) {
 		t.Fatal("hardware decode was not propagated")
 	}
 }
+
+func TestExampleConfigLoads(t *testing.T) {
+	cfg, err := LoadPlaybackConfig(filepath.Join("..", "transcoder.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Libraries) < 3 {
+		t.Fatalf("expected production library examples, got %d", len(cfg.Libraries))
+	}
+	if len(cfg.Profiles) < 3 {
+		t.Fatalf("expected HLS and DASH profile examples, got %d", len(cfg.Profiles))
+	}
+	if got := cfg.Profiles["hls-h264-nvenc"].Variants[3].VideoBitrate; got != 5500000 {
+		t.Fatalf("human-readable example bitrate parsed as %d", got)
+	}
+}

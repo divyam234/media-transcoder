@@ -66,3 +66,21 @@ func TestLocalLibraryStreamsDirectlyThroughAVIO(t *testing.T) {
 		t.Fatalf("direct AVIO streaming should not materialize a VFS cache: %v", err)
 	}
 }
+
+func TestPlainLibraryVFSOptionsAcceptHumanReadableSizes(t *testing.T) {
+	lib := LibraryConfig{
+		VFS: t.TempDir(),
+		Options: map[string]string{
+			"vfs_cache_mode":     "full",
+			"vfs_cache_max_size": "100GiB",
+			"vfs_read_ahead":     "64MiB",
+		},
+	}
+	cfg, err := decodeLibraryVFSConfig(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Options["vfs_cache_max_size"] != "100GiB" || cfg.Options["vfs_read_ahead"] != "64MiB" {
+		t.Fatalf("options were not preserved: %#v", cfg.Options)
+	}
+}

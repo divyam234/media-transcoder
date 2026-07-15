@@ -1,85 +1,207 @@
+# Production-oriented example for adaptive HLS/DASH streaming.
+# Copy this file, adjust paths/remotes, and keep secrets outside source control.
+
 server:
   addr: ":8080"
-  cache_root: "/var/cache/media-transcoder/segments"
-  vfs_cache_root: "/var/cache/media-transcoder/vfs"
-  debug: true
-  max_jobs: 4
+  debug: false
   request_timeout: "30m"
-  allow_input_roots:
-    - "/srv/media"
+  max_jobs: 4
+  rate_limit: 0
+
+  # Generated manifests, init segments, and transcoded media segments.
+  cache_root: "/var/cache/media-transcoder/segments"
+
+  # Dedicated rclone VFS cache. Keep this separate from generated segments.
+  vfs_cache_root: "/var/cache/media-transcoder/vfs"
+
+  # Optional API authentication.
+  # api_keys:
+  #   - "replace-with-a-long-random-key"
+
   cors_origins:
-    - "http://localhost:5173"
+    - "https://media.example.com"
 
 libraries:
-  # Every library is opened through rclone's fs + VFS layer. A plain path uses
-  # the local backend; any rclone connection string or configured remote works.
-  movies:
+  # Local files still go through rclone VFS, giving local and remote libraries
+  # the same read/seek behavior.
+  local_movies:
     vfs: "/srv/media/movies"
+    options:
+      vfs_cache_mode: "off"
+      dir_cache_time: "5m"
+      poll_interval: "1m"
 
-  # Connection-string remote example (all rclone backends are linked):
-  tv:
-    vfs: ":s3,provider=AWS,env_auth=true:my-media-bucket/tv"
+  # Named remote loaded from rclone.conf. Full VFS caching is useful for remote
+  # media because FFmpeg performs random seeks while probing and transcoding.
+  cloud_movies:
+    vfs: "gdrive:Movies"
+    options:
+      vfs_cache_mode: "full"
+      vfs_cache_max_size: "250GiB"
+      vfs_cache_max_age: "24h"
+      vfs_cache_poll_interval: "1m"
+      vfs_read_ahead: "64MiB"
+      vfs_read_chunk_size: "16MiB"
+      vfs_read_chunk_size_limit: "1GiB"
+      dir_cache_time: "10m"
+      poll_interval: "1m"
 
-  # For secrets, pass base64/base64url encoded JSON instead of plaintext YAML:
-  # {"vfs":"remote:movies","options":{"vfs_cache_mode":"full","vfs_read_ahead":"64M"}}
-  # private_movies:
-  #   encoded_config: "eyJ2ZnMiOiJyZW1vdGU6bW92aWVzIiwib3B0aW9ucyI6eyJ2ZnNfY2FjaGVfbW9kZSI6ImZ1bGwifX0"
+  # Connection-string remotes work without an rclone.conf entry.
+  object_storage:
+    vfs: ":s3,provider=AWS,env_auth=true:media-bucket/library"
+    options:
+      vfs_cache_mode: "full"
+      vfs_cache_max_size: "500GiB"
+      vfs_cache_max_age: "48h"
+      vfs_read_ahead: "128MiB"
+      vfs_read_chunk_size: "32MiB"
+      vfs_read_chunk_size_limit: "2GiB"
+
+  # For secrets, use base64/base64url encoded JSON rather than plaintext YAML.
+  # JSON shape:
+  # {"vfs":"remote:Movies","options":{"vfs_cache_mode":"full","vfs_read_ahead":"64MiB"}}
+  # private_library:
+  #   encoded_config: "BASE64URL_ENCODED_JSON"
 
 profiles:
-  web-h264:
+  # NVIDIA HLS profile. NVENC performs video encoding on the NVIDIA GPU.
+  hls-h264-nvenc:
     container: hls
     segment_type: fmp4
     segment_seconds: 4
     audio:
       mode: transcode
       codec: aac
-      bitrate: 128000
+      bitrate: 128kbps
       channels: 2
       sample_rate: 48000
     video:
       codec: h264
-      encoder_name: libx264
-      # Required for *_vaapi encoders; defaults to /dev/dri/renderD128.
-      # hardware_device: /dev/dri/renderD128
-      # hardware_decode: true # VAAPI decode + scale_vaapi zero-copy path
-      preset: veryfast
-      crf: 28
+      encoder_name: h264_nvenc
+      preset: ultrafast
+      crf: 23
       gop_size: 96
       max_b_frames: 0
     variants:
       - name: 360p
         width: 640
         height: 360
-        video_bitrate: 900000
-        crf: 30
+        video_bitrate: 800kbps
+        crf: 28
+      - name: 480p
+        width: 854
+        height: 480
+        video_bitrate: 1.4Mbps
+        crf: 27
       - name: 720p
         width: 1280
         height: 720
-        video_bitrate: 2800000
-        crf: 28
+        video_bitrate: 2.8Mbps
+        crf: 25
+      - name: 1080p
+        width: 1920
+        height: 1080
+        video_bitrate: 5.5Mbps
+        crf: 23
 
-  nvidia-h264:
+  # Intel/AMD VAAPI HLS profile. Hardware decode enables the zero-copy
+  # decode -> scale_vaapi -> encode path when supported by the driver.
+  hls-h264-vaapi:
     container: hls
     segment_type: fmp4
     segment_seconds: 4
     audio:
       mode: transcode
       codec: aac
-      bitrate: 128000
+      bitrate: 128kbps
       channels: 2
+      sample_rate: 48000
     video:
       codec: h264
-      encoder_name: h264_nvenc
-      preset: fast
-      crf: 30
+      encoder_name: h264_vaapi
+      hardware_device: "/dev/dri/renderD128"
+      hardware_decode: true
+      crf: 24
       gop_size: 96
       max_b_frames: 0
     variants:
+      - name: 480p
+        width: 854
+        height: 480
+        video_bitrate: 1.5Mbps
       - name: 720p
         width: 1280
         height: 720
-        video_bitrate: 2800000
+        video_bitrate: 3Mbps
       - name: 1080p
         width: 1920
         height: 1080
-        video_bitrate: 5000000
+        video_bitrate: 6Mbps
+
+  # NVIDIA MPEG-DASH profile.
+  dash-h264-nvenc:
+    container: dash
+    segment_type: fmp4
+    segment_seconds: 4
+    audio:
+      mode: transcode
+      codec: aac
+      bitrate: 128kbps
+      channels: 2
+      sample_rate: 48000
+    video:
+      codec: h264
+      encoder_name: h264_nvenc
+      preset: ultrafast
+      crf: 23
+      gop_size: 96
+      max_b_frames: 0
+    variants:
+      - name: 360p
+        width: 640
+        height: 360
+        video_bitrate: 800kbps
+        crf: 28
+      - name: 720p
+        width: 1280
+        height: 720
+        video_bitrate: 2.8Mbps
+        crf: 25
+      - name: 1080p
+        width: 1920
+        height: 1080
+        video_bitrate: 5.5Mbps
+        crf: 23
+
+  # VAAPI MPEG-DASH profile.
+  dash-h264-vaapi:
+    container: dash
+    segment_type: fmp4
+    segment_seconds: 4
+    audio:
+      mode: transcode
+      codec: aac
+      bitrate: 128kbps
+      channels: 2
+      sample_rate: 48000
+    video:
+      codec: h264
+      encoder_name: h264_vaapi
+      hardware_device: "/dev/dri/renderD128"
+      hardware_decode: true
+      crf: 24
+      gop_size: 96
+      max_b_frames: 0
+    variants:
+      - name: 480p
+        width: 854
+        height: 480
+        video_bitrate: 1.5Mbps
+      - name: 720p
+        width: 1280
+        height: 720
+        video_bitrate: 3Mbps
+      - name: 1080p
+        width: 1920
+        height: 1080
+        video_bitrate: 6Mbps

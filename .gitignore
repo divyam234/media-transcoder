@@ -19,3 +19,4 @@ build/
 .idea/
 *.swp
 *.swo
+/transcode-server

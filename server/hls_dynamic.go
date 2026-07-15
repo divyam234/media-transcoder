@@ -449,7 +449,7 @@ func buildHLSVariants(base transcoder.HLSOptions, requested []transcoder.LadderV
 		if bw <= 0 {
 			bw = max(1, width) * 2200
 		}
-		return []DynamicHLSVariant{{Name: "default", Width: width, Height: height, Bandwidth: bw, Options: base}}
+		return []DynamicHLSVariant{{Name: "default", Width: width, Height: height, Bandwidth: int(bw), Options: base}}
 	}
 	out := make([]DynamicHLSVariant, 0, len(requested))
 	for _, rv := range requested {
@@ -474,10 +474,10 @@ func buildHLSVariants(base transcoder.HLSOptions, requested []transcoder.LadderV
 			opts.CRF = rv.CRF
 		}
 		if rv.VideoBitrate > 0 {
-			opts.VideoBitrate = rv.VideoBitrate
+			opts.VideoBitrate = int(rv.VideoBitrate)
 		}
 		if rv.AudioBitrate > 0 {
-			opts.AudioBitrate = rv.AudioBitrate
+			opts.AudioBitrate = int(rv.AudioBitrate)
 		}
 		width := opts.Width
 		if width <= 0 {
@@ -489,12 +489,12 @@ func buildHLSVariants(base transcoder.HLSOptions, requested []transcoder.LadderV
 		}
 		bw := rv.VideoBitrate + rv.AudioBitrate
 		if bw <= 0 {
-			bw = opts.VideoBitrate + opts.AudioBitrate
+			bw = transcoder.Bitrate(opts.VideoBitrate + opts.AudioBitrate)
 		}
 		if bw <= 0 {
-			bw = max(1, width) * 2200
+			bw = transcoder.Bitrate(max(1, width) * 2200)
 		}
-		out = append(out, DynamicHLSVariant{Name: name, Width: width, Height: height, Bandwidth: bw, Options: opts})
+		out = append(out, DynamicHLSVariant{Name: name, Width: width, Height: height, Bandwidth: int(bw), Options: opts})
 	}
 	return out
 }
