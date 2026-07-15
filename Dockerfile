@@ -31,6 +31,7 @@ RUN case "$TARGETARCH" in \
 WORKDIR /src
 
 COPY go.mod go.sum ./
+COPY third_party/rclone/go.mod third_party/rclone/go.sum ./third_party/rclone/
 RUN go mod download
 
 COPY . .
