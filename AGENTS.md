@@ -1,94 +1,142 @@
 # AGENTS.md
+
 ## Build
 
-Requires FFmpeg 8.1+ shared libs (`libavformat`, `libavcodec`, `libavutil`, `libavfilter`) with pkg-config files installed.
+Requires Go 1.26, CGO, and FFmpeg 8.1+ development libraries for:
 
-If FFmpeg dev packages are installed system-wide, just run:
+- `libavformat`
+- `libavcodec`
+- `libavutil`
+- `libavfilter`
 
-```bash
-make build
-```
-
-For a custom FFmpeg build:
-
-```bash
-export FFMPEG_PREFIX=/path/to/ffmpeg-8.1
-make build
-```
-
-The binary `transcode-server` is written to the repo root.
-
-## Package structure
-
-| Path | Role |
-|------|------|
-| `media-transcoder` (root) | Core libav bridge via cgo — probe, transcode, segment, capabilities |
-| `server/` | HTTP server (chi router), dynamic HLS/DASH session management |
-| `cmd/transcode-server/` | Main binary, CLI flags via `pflag` |
-| `testdata/sample.mp4` | Small test media file used by unit tests |
-
-## Key CLI flags
-
-```
---config       YAML config file with libraries/profiles/server defaults
---addr         Listen address (default :8080)
---request-timeout  Request timeout (default 30m)
---max-jobs     Max concurrent segment jobs (default 4)
---rate-limit   Requests/min per client (0 = unlimited)
---cache-root   Server-owned cache root (ignores client cache_dir when set)
---allow-input-root  Repeatable; restricts input_path. Empty = allow any path.
---api-keys     Comma-separated; empty = disable auth
---cors-origins Default is *; set to specific origins for credentialed requests
---debug        Debug logging
-```
-
-## Tests
+Use the repository recipes so the Nix FFmpeg environment is applied:
 
 ```bash
-go test ./... -count=1
-go test -race ./... -count=1
+just build
 ```
 
-Tests use `testdata/sample.mp4` via relative path `filepath.Join("..", "testdata", "sample.mp4")` from the `server/` package.
+The binary is written to `./transcode-server`.
 
-Two integration tests are skipped by default — they require `TRANSCODER_TEST_LONG_INPUT` pointing to a HEVC media file:
-- `server/long_media_integration_test.go`
-- `server/hls_client_integration_test.go` (also needs `ffmpeg` CLI on PATH or `TRANSCODER_FFMPEG_CLI`)
+## Validation
+
+Run the narrowest relevant test first, then the full checks before committing:
+
+```bash
+just test
+just test-race
+just build
+git diff --check
+```
+
+Remove the generated binary after validation when it is not part of the change:
+
+```bash
+rm -f transcode-server
+```
+
+Optional integration tests may require external media, FFmpeg CLI, or hardware devices. Do not claim they passed unless they were explicitly run.
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| root package | Direct libav/cgo transcoding, probing, AVIO callbacks, shared types |
+| `ffmpeg_bridge.c` | libav implementation and custom AVIO integration |
+| `server/` | HTTP API, HLS/DASH sessions, library routing, rclone VFS integration |
+| `cmd/transcode-server/` | CLI entry point |
+| `third_party/rclone/` | Pinned rclone fork submodule |
+| `transcoder.example.yaml` | Valid production-oriented configuration example |
+| `testdata/sample.mp4` | Small media fixture used by tests |
 
 ## Architecture
 
-- Transcoding runs as direct libav calls via cgo (`ffmpeg_bridge.c`/`.h`). No `ffmpeg` or `ffprobe` subprocess is spawned.
-- Media segments are generated on demand at request time (virtual manifests, real segments).
-- Generated segments are cached by path. Cache is keyed by session or (for library URLs) by content hash + profile.
-- Each segment is independently generated from a seek window using `start_time`/`duration` options.
-- Dynamic ABR: requesting one variant's segment does not generate other variants.
-- Library URLs (`/play/hls/{profile}/{library}/{path...}`) auto-create sessions keyed by content metadata + profile hash.
+- Do not spawn `ffmpeg` or `ffprobe` for normal transcoding. The server calls libav directly through cgo.
+- Library media is opened through rclone `fs` + VFS, including local paths.
+- rclone VFS streams into libav through a custom `AVIOContext`; do not reintroduce full-file materialization.
+- Every demuxer open gets an independent VFS handle. Never share seek position between concurrent jobs.
+- HLS and DASH manifests are generated dynamically. Media segments are generated on demand and cached.
+- Session cleanup must wait for active workers before deleting AVIO registrations or shutting down VFS instances.
 
-## Config
+## Configuration
 
-YAML config (via `--config`) defines:
-- `libraries` — named media roots with symlink policy
-- `profiles` — playback profiles with optional ABR variants
+The YAML file contains `server`, `libraries`, and `profiles`.
 
-`POST /v1/admin/reload` hot-reloads the profile/library section.
+Libraries use:
 
-## Audio
+```yaml
+libraries:
+  movies:
+    vfs: "gdrive:Movies"
+    options:
+      vfs_cache_mode: "full"
+      vfs_cache_max_size: "250GiB"
+      vfs_read_ahead: "64MiB"
+```
 
-Dynamic playback always transcodes audio via `atrim` + `asetpts` filters (never packet copy), because compressed audio packets cannot be safely sample-trimmed. Three modes: `skip`, `copy`, `transcode` (defaults to `transcode` when source has audio).
+`vfs` may be a local path, named rclone remote, or connection string. Secret-bearing configurations may use `encoded_config`.
 
-## Important gotchas
+Keep caches separate:
 
-- All API routes require auth when `--api-keys` is set. Auth header: `X-API-Key` or `Authorization: Bearer`.
-- Static transcode endpoints (`/v1/transcode/*`, `/v1/sessions`) were removed. Only dynamic playback exists.
-- Subtitle handling is not implemented. Set `skip_subtitles=true` or omit.
-- No pre-commit hooks, linters, or formatters are configured.
-- `Height` in video options is reserved; current filter keeps aspect via width only.
-- cgo means `CGO_ENABLED=1` is required (it is by default but must not be overridden).
-- The binary links FFmpeg shared libs via rpath set at build time.
+```yaml
+server:
+  cache_root: "/var/cache/media-transcoder/segments"
+  vfs_cache_root: "/var/cache/media-transcoder/vfs"
+```
 
-## Compatibility notes
+- `cache_root`: generated HLS/DASH manifests and segments
+- `vfs_cache_root`: global rclone VFS cache directory
 
-- Chi router is used for HTTP routing (not stdlib mux).
-- `pflag` (not std `flag`) for CLI parsing.
-- Module path is `media-transcoder` (root package import path).
-- Go version is 1.26 (see `go.mod`).
+Bitrates accept numeric bits per second or readable values such as `128kbps`, `2.8Mbps`, and `1Gbit/s`. Rclone size and duration options use rclone-native values such as `64MiB`, `250GiB`, and `24h`.
+
+Keep `transcoder.example.yaml` loadable. `TestExampleConfigLoads` protects it.
+
+## Playback routes
+
+```text
+GET /play/hls/{profile}/{library}/{relative-path}/master.m3u8
+GET /play/dash/{profile}/{library}/{relative-path}/manifest.mpd
+```
+
+The media path is relative to the configured library VFS root. URL-escape spaces and reserved characters.
+
+## Hardware profiles
+
+The checked-in example uses NVENC and VAAPI only.
+
+- NVENC encoder: `h264_nvenc`
+- VAAPI encoder: `h264_vaapi`
+- VAAPI device default example: `/dev/dri/renderD128`
+- NVENC preset used by the example: `ultrafast`
+- The bridge does not pass a preset option to VAAPI
+
+Do not add software profiles to the production example unless explicitly requested.
+
+## CLI flags
+
+Important flags:
+
+```text
+--config
+--addr
+--request-timeout
+--max-jobs
+--rate-limit
+--cache-root
+--vfs-cache-root
+--allow-input-root
+--api-keys
+--cors-origins
+--cors-credentials
+--debug
+```
+
+`--cache-root` and `--vfs-cache-root` are independent.
+
+## Editing rules
+
+- Preserve unrelated user changes.
+- Keep changes local and simple.
+- Update tests when changing configuration parsing, playback URLs, VFS lifecycle, or AVIO behavior.
+- Update `README.md` and `transcoder.example.yaml` when public configuration or routes change.
+- Check Git status and final diff before committing.
+- Do not commit, push, amend, rebase, or alter remotes unless explicitly requested.
