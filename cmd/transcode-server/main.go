@@ -27,6 +27,7 @@ func main() {
 	var rateLimit int
 	var maxJobs int
 	var cacheRoot string
+	var vfsCacheRoot string
 	var allowedRoots []string
 	var debug bool
 	var corsOrigins string
@@ -38,7 +39,8 @@ func main() {
 	pflag.StringVar(&apiKeys, "api-keys", "", "comma-separated API keys; empty disables auth")
 	pflag.IntVar(&rateLimit, "rate-limit", 0, "requests per minute per remote address; 0 disables rate limit")
 	pflag.IntVar(&maxJobs, "max-jobs", 4, "maximum concurrent asynchronous transcode jobs")
-	pflag.StringVar(&cacheRoot, "cache-root", "", "server-owned cache root; client cache_dir is ignored when set")
+	pflag.StringVar(&cacheRoot, "cache-root", "", "server-owned HLS/DASH segment cache root; client cache_dir is ignored when set")
+	pflag.StringVar(&vfsCacheRoot, "vfs-cache-root", "", "rclone VFS cache directory; empty uses rclone default")
 	pflag.StringArrayVar(&allowedRoots, "allow-input-root", nil, "allowed input root; repeat to allow multiple roots; empty allows any path")
 	pflag.BoolVar(&debug, "debug", false, "enable debug logging")
 	pflag.StringVar(&corsOrigins, "cors-origins", "*", "comma-separated CORS allowed origins; use * for public playback")
@@ -51,7 +53,7 @@ func main() {
 	}
 
 	keys := splitCSV(apiKeys)
-	cfg := server.Config{RequestTimeout: timeout, APIKeys: keys, RateLimitPerMinute: rateLimit, MaxConcurrentJobs: maxJobs, CacheRoot: cacheRoot, AllowedInputRoots: allowedRoots, CORS: server.CORSConfig{AllowedOrigins: splitCSVDefault(corsOrigins, []string{"*"}), AllowCredentials: corsCredentials}}
+	cfg := server.Config{RequestTimeout: timeout, APIKeys: keys, RateLimitPerMinute: rateLimit, MaxConcurrentJobs: maxJobs, CacheRoot: cacheRoot, VFSCacheRoot: vfsCacheRoot, AllowedInputRoots: allowedRoots, CORS: server.CORSConfig{AllowedOrigins: splitCSVDefault(corsOrigins, []string{"*"}), AllowCredentials: corsCredentials}}
 	if configPath != "" {
 		fileCfg, err := server.LoadConfigFile(configPath)
 		if err != nil {

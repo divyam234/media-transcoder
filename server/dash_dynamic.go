@@ -55,6 +55,7 @@ type DynamicDASHSession struct {
 	Info            transcoder.MediaInfo
 	CreatedAt       time.Time
 	SourceKey       string
+	InputCleanup    func()
 	codecMu         sync.Mutex
 	ctx             context.Context
 	cancel          context.CancelFunc

@@ -23,7 +23,7 @@ func testProfileConfig(t *testing.T, cache string) Config {
 		CacheRoot:         cache,
 		AllowedInputRoots: []string{root},
 		Libraries: map[string]LibraryConfig{
-			"samples": {Root: root},
+			"samples": {VFS: root},
 		},
 		Profiles: map[string]PlaybackProfile{
 			"web-h264": {
@@ -43,6 +43,7 @@ func testProfileConfig(t *testing.T, cache string) Config {
 
 func TestProfileAndLibraryRoutes(t *testing.T) {
 	s := New(testProfileConfig(t, t.TempDir()))
+	t.Cleanup(s.Close)
 	for _, path := range []string{"/v1/profiles", "/v1/profiles/web-h264", "/v1/libraries", "/v1/libraries/samples"} {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -56,6 +57,7 @@ func TestProfileAndLibraryRoutes(t *testing.T) {
 func TestLibraryHLSMasterUsesProfileVariantsAndAutoSessionReuse(t *testing.T) {
 	cache := t.TempDir()
 	s := New(testProfileConfig(t, cache))
+	t.Cleanup(s.Close)
 	path := "/play/hls/web-h264/samples/sample.mp4/master.m3u8"
 	for i := 0; i < 2; i++ {
 		rr := httptest.NewRecorder()
@@ -83,6 +85,7 @@ func TestLibraryHLSMasterUsesProfileVariantsAndAutoSessionReuse(t *testing.T) {
 
 func TestLibraryHLSVariantPlaylistAndSegment(t *testing.T) {
 	s := New(testProfileConfig(t, t.TempDir()))
+	t.Cleanup(s.Close)
 	playlist := "/play/hls/web-h264/samples/sample.mp4/variant/low/video.m3u8"
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, playlist, nil)
@@ -107,6 +110,7 @@ func TestLibraryHLSVariantPlaylistAndSegment(t *testing.T) {
 
 func TestLibraryDASHManifestUsesProfileVariants(t *testing.T) {
 	s := New(testProfileConfig(t, t.TempDir()))
+	t.Cleanup(s.Close)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/play/dash/web-h264/samples/sample.mp4/manifest.mpd", nil)
 	s.Handler().ServeHTTP(rr, req)
@@ -121,6 +125,7 @@ func TestLibraryDASHManifestUsesProfileVariants(t *testing.T) {
 
 func TestLibraryPathTraversalRejected(t *testing.T) {
 	s := New(testProfileConfig(t, t.TempDir()))
+	t.Cleanup(s.Close)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/play/hls/web-h264/samples/../sample.mp4/master.m3u8", nil)
 	s.Handler().ServeHTTP(rr, req)

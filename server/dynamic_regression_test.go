@@ -83,6 +83,7 @@ func createTestDASHSession(t *testing.T, ts *httptest.Server, cache string) Dyna
 func TestDynamicHLSSegmentConcurrentRequestsShareCacheAndLeaveNoTmp(t *testing.T) {
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 2 * time.Minute, MaxConcurrentJobs: 2})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	created := createTestHLSSession(t, ts, cache)
@@ -152,6 +153,7 @@ func TestDynamicHLSSegmentConcurrentRequestsShareCacheAndLeaveNoTmp(t *testing.T
 func TestDynamicHLSCanceledContextDoesNotCreateTempOrCache(t *testing.T) {
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: time.Minute, MaxConcurrentJobs: 1})
+	t.Cleanup(srv.Close)
 	sessCtx, sessCancel := context.WithCancel(context.Background())
 	defer sessCancel()
 	sess := &DynamicHLSSession{
@@ -184,6 +186,7 @@ func TestDynamicHLSCanceledContextDoesNotCreateTempOrCache(t *testing.T) {
 func TestDynamicHLSSessionDeleteCancelsRemovesCacheAndLocks(t *testing.T) {
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 2 * time.Minute, MaxConcurrentJobs: 1})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	created := createTestHLSSession(t, ts, cache)
@@ -229,6 +232,7 @@ func TestDynamicHLSSessionDeleteCancelsRemovesCacheAndLocks(t *testing.T) {
 func TestDynamicDASHCanceledContextAndDeleteCleanup(t *testing.T) {
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 2 * time.Minute, MaxConcurrentJobs: 1})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	created := createTestDASHSession(t, ts, cache)
@@ -269,6 +273,7 @@ func TestDynamicDASHCanceledContextAndDeleteCleanup(t *testing.T) {
 func TestDynamicPlaybackRepeatedCachedRequestsDoNotLeakGoroutines(t *testing.T) {
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 2 * time.Minute, MaxConcurrentJobs: 2})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	created := createTestHLSSession(t, ts, cache)
@@ -318,6 +323,7 @@ func TestOptionalDynamicPlaybackRSSBounded(t *testing.T) {
 	}
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 2 * time.Minute, MaxConcurrentJobs: 2})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	created := createTestHLSSession(t, ts, cache)

@@ -34,7 +34,7 @@ func TestOptionalLibraryDASHWithSeparateAudio(t *testing.T) {
 		MaxConcurrentJobs: 2,
 		CacheRoot:         t.TempDir(),
 		AllowedInputRoots: []string{root},
-		Libraries:         map[string]LibraryConfig{"media": {Root: root}},
+		Libraries:         map[string]LibraryConfig{"media": {VFS: root}},
 		Profiles: map[string]PlaybackProfile{"dash": {
 			Container:      "dash",
 			SegmentSeconds: 4,

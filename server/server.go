@@ -34,6 +34,8 @@ type Config struct {
 	// CacheRoot forces all dynamic playback cache directories under a server-owned root.
 	// When set, client-provided cache_dir is ignored.
 	CacheRoot string
+	// VFSCacheRoot is the dedicated rclone VFS cache directory. Empty uses rclone default.
+	VFSCacheRoot string
 	// AllowedInputRoots restricts input_path to these roots. Empty means allow any path.
 	AllowedInputRoots []string
 	CORS              CORSConfig
@@ -64,12 +66,16 @@ type Server struct {
 	dynDASH           *DynamicDASHManager
 	metrics           *Metrics
 	cacheRoot         string
+	vfsCacheRoot      string
 	allowedInputRoots []string
 	configPath        string
 	libraries         map[string]LibraryConfig
 	profiles          map[string]PlaybackProfile
 	configMu          sync.RWMutex
 	sessionMu         sync.Mutex
+	retiredInputs     []func()
+	vfsMu             sync.Mutex
+	libraryVFS        map[string]*libraryVFS
 }
 
 func New(cfg Config) *Server {
@@ -82,7 +88,7 @@ func New(cfg Config) *Server {
 	if cfg.MaxConcurrentJobs <= 0 {
 		cfg.MaxConcurrentJobs = 4
 	}
-	s := &Server{router: chi.NewRouter(), logger: cfg.Logger, timeout: cfg.RequestTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots), configPath: cfg.ConfigPath, libraries: normalizeLibraries(cfg.Libraries), profiles: normalizeProfiles(cfg.Profiles)}
+	s := &Server{router: chi.NewRouter(), logger: cfg.Logger, timeout: cfg.RequestTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, vfsCacheRoot: cfg.VFSCacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots), configPath: cfg.ConfigPath, libraries: normalizeLibraries(cfg.Libraries), profiles: normalizeProfiles(cfg.Profiles), libraryVFS: map[string]*libraryVFS{}}
 	s.routes(cfg.CORS)
 	return s
 }
@@ -90,18 +96,38 @@ func New(cfg Config) *Server {
 func (s *Server) Handler() http.Handler { return s.router }
 
 func (s *Server) Close() {
-	for _, sess := range s.dynHLS.StopAll() {
+	hlsSessions := s.dynHLS.StopAll()
+	for _, sess := range hlsSessions {
 		if sess.cancel != nil {
 			sess.cancel()
 		}
 	}
-	for _, sess := range s.dynDASH.StopAll() {
+	dashSessions := s.dynDASH.StopAll()
+	for _, sess := range dashSessions {
 		if sess.cancel != nil {
 			sess.cancel()
 		}
 	}
 	s.dynHLS.Wait()
 	s.dynDASH.Wait()
+	for _, sess := range hlsSessions {
+		if sess.InputCleanup != nil {
+			sess.InputCleanup()
+		}
+	}
+	for _, sess := range dashSessions {
+		if sess.InputCleanup != nil {
+			sess.InputCleanup()
+		}
+	}
+	s.sessionMu.Lock()
+	retired := s.retiredInputs
+	s.retiredInputs = nil
+	s.sessionMu.Unlock()
+	for _, cleanup := range retired {
+		cleanup()
+	}
+	s.shutdownLibraryVFS()
 }
 
 func (s *Server) routes(corsCfg CORSConfig) {
@@ -760,13 +786,10 @@ func (r *rateLimiter) Allow(key string) bool {
 func normalizeLibraries(in map[string]LibraryConfig) map[string]LibraryConfig {
 	out := map[string]LibraryConfig{}
 	for id, lib := range in {
-		if id == "" || lib.Root == "" {
+		if id == "" || (lib.VFS == "" && lib.EncodedConfig == "") {
 			continue
 		}
 		lib.ID = id
-		if abs, err := filepath.Abs(lib.Root); err == nil {
-			lib.Root = filepath.Clean(abs)
-		}
 		out[id] = lib
 	}
 	return out

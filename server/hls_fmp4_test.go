@@ -15,6 +15,7 @@ func TestDynamicHLSFMP4PlaylistAndSegment(t *testing.T) {
 	input := filepath.Join("..", "testdata", "avsample.mp4")
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 0, MaxConcurrentJobs: 1})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

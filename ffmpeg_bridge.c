@@ -19,6 +19,93 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <stdint.h>
+
+extern uintptr_t goAVIOOpen(uintptr_t factory_handle);
+extern void goAVIOClose(uintptr_t stream_handle);
+extern int goAVIORead(uintptr_t stream_handle, uint8_t *buf, int size);
+extern int64_t goAVIOSeek(uintptr_t stream_handle, int64_t offset, int whence);
+
+typedef struct TCAVIOInput {
+    AVIOContext *ctx;
+    uintptr_t factory_handle;
+    uintptr_t stream_handle;
+} TCAVIOInput;
+
+static int tc_avio_read(void *opaque, uint8_t *buf, int size) {
+    TCAVIOInput *input = (TCAVIOInput *)opaque;
+    return input ? goAVIORead(input->stream_handle, buf, size) : AVERROR(EIO);
+}
+
+static int64_t tc_avio_seek(void *opaque, int64_t offset, int whence) {
+    TCAVIOInput *input = (TCAVIOInput *)opaque;
+    return input ? goAVIOSeek(input->stream_handle, offset, whence) : AVERROR(EIO);
+}
+
+static int tc_open_input(AVFormatContext **fmt, const char *input_path, TCAVIOInput **custom_input) {
+    static const char prefix[] = "goavio:";
+    if (!fmt || !input_path) return AVERROR(EINVAL);
+    if (strncmp(input_path, prefix, sizeof(prefix) - 1) != 0) {
+        return avformat_open_input(fmt, input_path, NULL, NULL);
+    }
+
+    char *end = NULL;
+    unsigned long long raw = strtoull(input_path + sizeof(prefix) - 1, &end, 10);
+    if (!end || (*end != '\0' && *end != '/') || raw == 0) return AVERROR(EINVAL);
+    const char *name_hint = *end == '/' && end[1] != '\0' ? end + 1 : NULL;
+
+    TCAVIOInput *input = (TCAVIOInput *)calloc(1, sizeof(*input));
+    if (!input) return AVERROR(ENOMEM);
+    input->factory_handle = (uintptr_t)raw;
+    input->stream_handle = goAVIOOpen(input->factory_handle);
+    if (!input->stream_handle) { free(input); return AVERROR(EIO); }
+    unsigned char *buffer = (unsigned char *)av_malloc(64 * 1024);
+    if (!buffer) {
+        goAVIOClose(input->stream_handle);
+        free(input);
+        return AVERROR(ENOMEM);
+    }
+    input->ctx = avio_alloc_context(buffer, 64 * 1024, 0, input, tc_avio_read, NULL, tc_avio_seek);
+    if (!input->ctx) {
+        av_free(buffer);
+        goAVIOClose(input->stream_handle);
+        free(input);
+        return AVERROR(ENOMEM);
+    }
+    input->ctx->seekable = AVIO_SEEKABLE_NORMAL;
+
+    if (!*fmt) *fmt = avformat_alloc_context();
+    if (!*fmt) {
+        avio_context_free(&input->ctx);
+        goAVIOClose(input->stream_handle);
+        free(input);
+        return AVERROR(ENOMEM);
+    }
+    (*fmt)->pb = input->ctx;
+    (*fmt)->flags |= AVFMT_FLAG_CUSTOM_IO;
+    int ret = avformat_open_input(fmt, name_hint, NULL, NULL);
+    if (ret < 0) {
+        if (*fmt) avformat_free_context(*fmt);
+        *fmt = NULL;
+        avio_context_free(&input->ctx);
+        goAVIOClose(input->stream_handle);
+        free(input);
+        return ret;
+    }
+    if (custom_input) *custom_input = input;
+    return 0;
+}
+
+static void tc_close_input(AVFormatContext **fmt, TCAVIOInput **custom_input) {
+    if (fmt && *fmt) avformat_close_input(fmt);
+    if (custom_input && *custom_input) {
+        avio_context_free(&(*custom_input)->ctx);
+        goAVIOClose((*custom_input)->stream_handle);
+        free(*custom_input);
+        *custom_input = NULL;
+    }
+}
+
 static __thread char g_last_error[1024];
 static pthread_once_t g_ffmpeg_init_once = PTHREAD_ONCE_INIT;
 
@@ -81,6 +168,7 @@ typedef struct TCDecoder {
     AVBufferRef *hw_frames_ctx;
     enum AVPixelFormat hw_pix_fmt;
     int hardware_decode;
+    TCAVIOInput *custom_input;
 } TCDecoder;
 
 static double stream_duration_seconds(AVFormatContext *fmt, AVStream *st) {
@@ -108,12 +196,13 @@ int tc_probe(const char *input_path, TCInfo *info) {
     ffmpeg_init();
 
     AVFormatContext *fmt = NULL;
-    int ret = avformat_open_input(&fmt, input_path, NULL, NULL);
+    TCAVIOInput *custom_input = NULL;
+    int ret = tc_open_input(&fmt, input_path, &custom_input);
     if (ret < 0) { set_av_error("avformat_open_input", ret); return ret; }
     ret = avformat_find_stream_info(fmt, NULL);
-    if (ret < 0) { set_av_error("avformat_find_stream_info", ret); avformat_close_input(&fmt); return ret; }
+    if (ret < 0) { set_av_error("avformat_find_stream_info", ret); tc_close_input(&fmt, &custom_input); return ret; }
     int idx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    if (idx < 0) { set_av_error("av_find_best_stream(video)", idx); avformat_close_input(&fmt); return idx; }
+    if (idx < 0) { set_av_error("av_find_best_stream(video)", idx); tc_close_input(&fmt, &custom_input); return idx; }
     AVStream *st = fmt->streams[idx];
     info->duration = stream_duration_seconds(fmt, st);
     info->width = st->codecpar->width;
@@ -123,7 +212,7 @@ int tc_probe(const char *input_path, TCInfo *info) {
         if (fmt->streams[i] && fmt->streams[i]->codecpar && fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) info->audio_streams++;
     }
     info->has_audio = info->audio_streams > 0 ? 1 : 0;
-    avformat_close_input(&fmt);
+    tc_close_input(&fmt, &custom_input);
     return 0;
 }
 
@@ -197,12 +286,13 @@ int tc_probe_codec(const char *input_path, int media_type, TCCodecInfo *info) {
     ffmpeg_init();
     enum AVMediaType type = media_type == 1 ? AVMEDIA_TYPE_AUDIO : AVMEDIA_TYPE_VIDEO;
     AVFormatContext *fmt = NULL;
-    int ret = avformat_open_input(&fmt, input_path, NULL, NULL);
+    TCAVIOInput *custom_input = NULL;
+    int ret = tc_open_input(&fmt, input_path, &custom_input);
     if (ret < 0) { set_av_error("avformat_open_input codec", ret); return ret; }
     ret = avformat_find_stream_info(fmt, NULL);
-    if (ret < 0) { set_av_error("avformat_find_stream_info codec", ret); avformat_close_input(&fmt); return ret; }
+    if (ret < 0) { set_av_error("avformat_find_stream_info codec", ret); tc_close_input(&fmt, &custom_input); return ret; }
     int idx = av_find_best_stream(fmt, type, -1, -1, NULL, 0);
-    if (idx < 0) { set_av_error("av_find_best_stream codec", idx); avformat_close_input(&fmt); return idx; }
+    if (idx < 0) { set_av_error("av_find_best_stream codec", idx); tc_close_input(&fmt, &custom_input); return idx; }
     AVCodecParameters *par = fmt->streams[idx]->codecpar;
     info->media_type = media_type;
     info->codec_id = par->codec_id;
@@ -212,7 +302,7 @@ int tc_probe_codec(const char *input_path, int media_type, TCCodecInfo *info) {
     info->channels = par->ch_layout.nb_channels;
     snprintf(info->codec_name, sizeof(info->codec_name), "%s", avcodec_get_name(par->codec_id));
     codec_string_from_parameters(par, info->codec_string, sizeof(info->codec_string));
-    avformat_close_input(&fmt);
+    tc_close_input(&fmt, &custom_input);
     return 0;
 }
 
@@ -225,7 +315,7 @@ static void decoder_close(TCDecoder *d) {
     av_buffer_unref(&d->hw_frames_ctx);
     av_buffer_unref(&d->hw_device_ctx);
     if (d->dec) avcodec_free_context(&d->dec);
-    if (d->fmt) avformat_close_input(&d->fmt);
+    tc_close_input(&d->fmt, &d->custom_input);
     free(d);
 }
 
@@ -266,7 +356,7 @@ static TCDecoder *decoder_open(const char *input_path, const char *hardware_devi
     if (!d->fmt) { set_error("avformat_alloc_context failed"); decoder_close(d); return NULL; }
     d->fmt->flags |= AVFMT_FLAG_GENPTS;
 
-    int ret = avformat_open_input(&d->fmt, input_path, NULL, NULL);
+    int ret = tc_open_input(&d->fmt, input_path, &d->custom_input);
     if (ret < 0) { set_av_error("avformat_open_input", ret); decoder_close(d); return NULL; }
     ret = avformat_find_stream_info(d->fmt, NULL);
     if (ret < 0) { set_av_error("avformat_find_stream_info", ret); decoder_close(d); return NULL; }

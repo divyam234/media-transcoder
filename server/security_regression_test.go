@@ -13,6 +13,7 @@ import (
 
 func TestAllowedInputRootsRejectsOutsidePath(t *testing.T) {
 	srv := New(Config{RequestTimeout: time.Minute, AllowedInputRoots: []string{t.TempDir()}})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	body, _ := json.Marshal(map[string]any{"input_path": filepath.Join("..", "testdata", "sample.mp4")})
@@ -31,6 +32,7 @@ func TestCacheRootOverridesClientCacheDir(t *testing.T) {
 	serverCache := t.TempDir()
 	clientCache := t.TempDir()
 	srv := New(Config{RequestTimeout: 2 * time.Minute, MaxConcurrentJobs: 1, CacheRoot: serverCache})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

@@ -13,6 +13,7 @@ import (
 
 func TestServerProbe(t *testing.T) {
 	s := New(Config{RequestTimeout: time.Minute})
+	t.Cleanup(s.Close)
 	body, _ := json.Marshal(map[string]string{"input_path": filepath.Join("..", "testdata", "sample.mp4")})
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/probe", bytes.NewReader(body))
@@ -24,6 +25,7 @@ func TestServerProbe(t *testing.T) {
 
 func TestStaticTranscodeRoutesAreNotExposed(t *testing.T) {
 	s := New(Config{RequestTimeout: time.Minute})
+	t.Cleanup(s.Close)
 	body, _ := json.Marshal(map[string]any{"input_path": filepath.Join("..", "testdata", "sample.mp4"), "output_path": filepath.Join(t.TempDir(), "out.mp4")})
 	for _, tc := range []struct {
 		method string
@@ -48,6 +50,7 @@ func TestStaticTranscodeRoutesAreNotExposed(t *testing.T) {
 
 func TestServerCapabilitiesAuthAndRateLimit(t *testing.T) {
 	s := New(Config{RequestTimeout: time.Minute, APIKeys: []string{"secret"}, RateLimitPerMinute: 1})
+	t.Cleanup(s.Close)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
 	s.Handler().ServeHTTP(rr, req)
@@ -74,6 +77,7 @@ func TestServerCapabilitiesAuthAndRateLimit(t *testing.T) {
 
 func TestServerRuntimeCapabilityRoutes(t *testing.T) {
 	s := New(Config{RequestTimeout: time.Minute})
+	t.Cleanup(s.Close)
 	for _, path := range []string{
 		"/v1/capabilities",
 		"/v1/capabilities/runtime",
@@ -95,6 +99,7 @@ func TestServerRuntimeCapabilityRoutes(t *testing.T) {
 
 func TestServerOpenAPISchemaRoute(t *testing.T) {
 	s := New(Config{RequestTimeout: time.Minute, APIKeys: []string{"secret"}})
+	t.Cleanup(s.Close)
 	for _, path := range []string{"/openapi.yaml", "/v1/openapi.yaml"} {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)

@@ -5,8 +5,8 @@ import (
 	"io"
 )
 
-// Source describes media input for the library. Path is fastest. ReadSeeker is
-// materialized to a temp file so direct libavformat sees deterministic file input.
+// Source describes media input. ReadSeeker is connected directly to libav through
+// a custom AVIOContext, so seekable remote streams do not require materialization.
 type Source struct {
 	Path       string
 	ReadSeeker io.ReadSeeker

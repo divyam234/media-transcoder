@@ -33,6 +33,7 @@ func TestOptionalHLSClientConsumesLongHEVCWithoutHardStuck(t *testing.T) {
 
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 30 * time.Minute, MaxConcurrentJobs: 4, CacheRoot: cache, AllowedInputRoots: []string{filepath.Dir(input)}})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

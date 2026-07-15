@@ -22,6 +22,7 @@ func request(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
 func TestLibraryHLSConcurrentMasterCreatesOneSession(t *testing.T) {
 	cache := t.TempDir()
 	s := New(testProfileConfig(t, cache))
+	t.Cleanup(s.Close)
 	const path = "/play/hls/web-h264/samples/sample.mp4/master.m3u8"
 
 	const workers = 24
@@ -64,6 +65,7 @@ func TestLibraryHLSConcurrentMasterCreatesOneSession(t *testing.T) {
 func TestLibraryDASHConcurrentManifestCreatesOneSession(t *testing.T) {
 	cache := t.TempDir()
 	s := New(testProfileConfig(t, cache))
+	t.Cleanup(s.Close)
 	const path = "/play/dash/web-h264/samples/sample.mp4/manifest.mpd"
 
 	const workers = 24
@@ -99,6 +101,7 @@ func TestLibraryDASHConcurrentManifestCreatesOneSession(t *testing.T) {
 func TestLibraryHLSCompleteFMP4FlowAndCacheReuse(t *testing.T) {
 	cache := t.TempDir()
 	s := New(testProfileConfig(t, cache))
+	t.Cleanup(s.Close)
 	base := "/play/hls/web-h264/samples/sample.mp4/variant/low"
 
 	for _, path := range []string{
@@ -140,6 +143,7 @@ func TestLibraryHLSCompleteFMP4FlowAndCacheReuse(t *testing.T) {
 func TestLibraryDASHCompleteFlowAndCacheReuse(t *testing.T) {
 	cache := t.TempDir()
 	s := New(testProfileConfig(t, cache))
+	t.Cleanup(s.Close)
 	base := "/play/dash/web-h264/samples/sample.mp4/variant/low/segment"
 
 	manifest := request(t, s, "/play/dash/web-h264/samples/sample.mp4/manifest.mpd")
@@ -172,8 +176,9 @@ func TestLibrarySessionInvalidatesWhenSourceChanges(t *testing.T) {
 	}
 	cfg := testProfileConfig(t, t.TempDir())
 	cfg.AllowedInputRoots = []string{root}
-	cfg.Libraries = map[string]LibraryConfig{"samples": {Root: root}}
+	cfg.Libraries = map[string]LibraryConfig{"samples": {VFS: root}}
 	s := New(cfg)
+	t.Cleanup(s.Close)
 
 	path := "/play/hls/web-h264/samples/sample.mp4/master.m3u8"
 	if rr := request(t, s, path); rr.Code != http.StatusOK {
@@ -208,12 +213,14 @@ func TestLibraryCacheReuseAcrossServerRestart(t *testing.T) {
 	path := "/play/hls/web-h264/samples/sample.mp4/variant/low/segment/000000.m4s"
 
 	s1 := New(cfg)
+	t.Cleanup(s1.Close)
 	first := request(t, s1, path)
 	if first.Code != http.StatusOK {
 		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
 	}
 
 	s2 := New(cfg)
+	t.Cleanup(s2.Close)
 	second := request(t, s2, path)
 	if second.Code != http.StatusOK {
 		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
@@ -228,6 +235,7 @@ func TestLibraryCacheReuseAcrossServerRestart(t *testing.T) {
 
 func TestLibraryMalformedPlaybackURLs(t *testing.T) {
 	s := New(testProfileConfig(t, t.TempDir()))
+	t.Cleanup(s.Close)
 	cases := []struct {
 		path string
 		want int

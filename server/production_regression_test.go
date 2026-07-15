@@ -121,6 +121,7 @@ func TestDynamicHLSABRVariantsAreVirtualAndGeneratedOnDemand(t *testing.T) {
 func TestMetricsExposeDynamicPlaybackCounters(t *testing.T) {
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 2 * time.Minute, MaxConcurrentJobs: 2})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	created := createTestHLSSession(t, ts, cache)

@@ -1,6 +1,7 @@
 server:
   addr: ":8080"
-  cache_root: "/var/cache/media-transcoder"
+  cache_root: "/var/cache/media-transcoder/segments"
+  vfs_cache_root: "/var/cache/media-transcoder/vfs"
   debug: true
   max_jobs: 4
   request_timeout: "30m"
@@ -10,12 +11,19 @@ server:
     - "http://localhost:5173"
 
 libraries:
+  # Every library is opened through rclone's fs + VFS layer. A plain path uses
+  # the local backend; any rclone connection string or configured remote works.
   movies:
-    root: "/srv/media/movies"
-    allow_symlinks: false
+    vfs: "/srv/media/movies"
+
+  # Connection-string remote example (all rclone backends are linked):
   tv:
-    root: "/srv/media/tv"
-    allow_symlinks: false
+    vfs: ":s3,provider=AWS,env_auth=true:my-media-bucket/tv"
+
+  # For secrets, pass base64/base64url encoded JSON instead of plaintext YAML:
+  # {"vfs":"remote:movies","options":{"vfs_cache_mode":"full","vfs_read_ahead":"64M"}}
+  # private_movies:
+  #   encoded_config: "eyJ2ZnMiOiJyZW1vdGU6bW92aWVzIiwib3B0aW9ucyI6eyJ2ZnNfY2FjaGVfbW9kZSI6ImZ1bGwifX0"
 
 profiles:
   web-h264:

@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
-	"strings"
 )
 
 type preparedSource struct {
@@ -25,26 +22,9 @@ func prepareSource(ctx context.Context, src Source) (preparedSource, error) {
 		return preparedSource{}, err
 	}
 	_, _ = src.ReadSeeker.Seek(0, io.SeekStart)
-	pattern := "transcoder-*"
-	if ext := filepath.Ext(src.Name); ext != "" && !strings.ContainsAny(ext, `/\\`) {
-		pattern += ext
-	}
-	f, err := os.CreateTemp("", pattern)
+	path, cleanup, err := RegisterReadSeekerInput(src.Name, src.ReadSeeker)
 	if err != nil {
 		return preparedSource{}, err
-	}
-	path := f.Name()
-	cleanup := func() { _ = os.Remove(path) }
-	_, copyErr := io.Copy(f, src.ReadSeeker)
-	closeErr := f.Close()
-	_, _ = src.ReadSeeker.Seek(0, io.SeekStart)
-	if copyErr != nil {
-		cleanup()
-		return preparedSource{}, copyErr
-	}
-	if closeErr != nil {
-		cleanup()
-		return preparedSource{}, closeErr
 	}
 	return preparedSource{path: path, cleanup: cleanup}, nil
 }

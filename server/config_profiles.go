@@ -31,6 +31,7 @@ type FileConfig struct {
 type FileServerConfig struct {
 	Addr            string   `yaml:"addr" json:"addr"`
 	CacheRoot       string   `yaml:"cache_root" json:"cache_root"`
+	VFSCacheRoot    string   `yaml:"vfs_cache_root" json:"vfs_cache_root"`
 	Debug           bool     `yaml:"debug" json:"debug"`
 	RequestTimeout  string   `yaml:"request_timeout" json:"request_timeout"`
 	MaxJobs         int      `yaml:"max_jobs" json:"max_jobs"`
@@ -43,8 +44,8 @@ type FileServerConfig struct {
 
 type LibraryConfig struct {
 	ID            string `yaml:"-" json:"id"`
-	Root          string `yaml:"root" json:"root"`
-	AllowSymlinks bool   `yaml:"allow_symlinks" json:"allow_symlinks"`
+	VFS           string `yaml:"vfs,omitempty" json:"-"`
+	EncodedConfig string `yaml:"encoded_config,omitempty" json:"-"`
 }
 
 type PlaybackProfile struct {
@@ -84,6 +85,7 @@ func LoadConfigFile(path string) (Config, error) {
 	}
 	cfg := Config{ConfigPath: path, Libraries: fc.Libraries, Profiles: fc.Profiles}
 	cfg.CacheRoot = fc.Server.CacheRoot
+	cfg.VFSCacheRoot = fc.Server.VFSCacheRoot
 	cfg.APIKeys = fc.Server.APIKeys
 	cfg.RateLimitPerMinute = fc.Server.RateLimit
 	cfg.MaxConcurrentJobs = fc.Server.MaxJobs
@@ -119,11 +121,9 @@ func LoadPlaybackConfig(path string) (*FileConfig, error) {
 	}
 	for id, lib := range cfg.Libraries {
 		lib.ID = id
-		abs, err := filepath.Abs(lib.Root)
-		if err != nil {
-			return nil, fmt.Errorf("library %s root: %w", id, err)
+		if _, err := decodeLibraryVFSConfig(lib); err != nil {
+			return nil, fmt.Errorf("library %s: %w", id, err)
 		}
-		lib.Root = filepath.Clean(abs)
 		cfg.Libraries[id] = lib
 	}
 	for id, p := range cfg.Profiles {
@@ -276,37 +276,8 @@ func (s *Server) reloadConfig(_ context.Context, w http.ResponseWriter, _ *http.
 	s.libraries = fc.Libraries
 	s.profiles = fc.Profiles
 	s.configMu.Unlock()
+	s.shutdownLibraryVFS()
 	writeJSON(w, http.StatusOK, map[string]any{"status": "reloaded", "profiles": len(fc.Profiles), "libraries": len(fc.Libraries)})
-}
-
-func (s *Server) resolveLibraryPath(libraryID, rawRel string) (string, error) {
-	s.configMu.RLock()
-	lib, ok := s.libraries[libraryID]
-	s.configMu.RUnlock()
-	if !ok {
-		return "", fmt.Errorf("library not found")
-	}
-	rel, err := urlPathClean(rawRel)
-	if err != nil {
-		return "", err
-	}
-	full := filepath.Join(lib.Root, filepath.FromSlash(rel))
-	full = filepath.Clean(full)
-	root := filepath.Clean(lib.Root)
-	if !pathInside(root, full) {
-		return "", fmt.Errorf("path escapes library root")
-	}
-	if !lib.AllowSymlinks {
-		eval, err := filepath.EvalSymlinks(full)
-		if err != nil {
-			return "", err
-		}
-		if !pathInside(root, eval) {
-			return "", fmt.Errorf("symlink escapes library root")
-		}
-		full = eval
-	}
-	return full, nil
 }
 
 func urlPathClean(p string) (string, error) {
@@ -487,25 +458,24 @@ func (s *Server) ensureLibraryHLSSession(ctx context.Context, profileID, library
 	if !ok {
 		return nil, errors.New("profile not found")
 	}
-	input, err := s.resolveLibraryPath(libraryID, rel)
+	resolved, err := s.resolveLibraryVFSInput(ctx, libraryID, rel)
 	if err != nil {
 		return nil, err
 	}
-	st, err := os.Stat(input)
-	if err != nil {
-		return nil, err
-	}
-	id := librarySessionID("hls", profileID, libraryID, rel, st, p)
+	id := librarySessionID("hls", profileID, libraryID, rel, resolved.Info, p)
 	if sess, ok := s.dynHLS.Get(id); ok {
+		resolved.Cleanup()
 		return sess, nil
 	}
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 	if sess, ok := s.dynHLS.Get(id); ok {
+		resolved.Cleanup()
 		return sess, nil
 	}
-	info, err := transcoder.ProbeFile(ctx, input)
+	info, err := transcoder.ProbeFile(ctx, resolved.Input)
 	if err != nil {
+		resolved.Cleanup()
 		return nil, err
 	}
 	opts := p.HLSOptions()
@@ -515,14 +485,18 @@ func (s *Server) ensureLibraryHLSSession(ctx context.Context, profileID, library
 	cacheRoot := s.cacheRootFor("", "media-transcoder-hls")
 	cacheDir := filepath.Join(cacheRoot, id)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		resolved.Cleanup()
 		return nil, err
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
 	sourceKey := "hls|" + profileID + "|" + libraryID + "|" + rel
-	sess := &DynamicHLSSession{ID: id, InputPath: input, Options: opts, Variants: buildHLSVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
+	sess := &DynamicHLSSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, Options: opts, Variants: buildHLSVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
 	for _, stale := range s.dynHLS.ReplaceSourceSession(sess) {
 		if stale.cancel != nil {
 			stale.cancel()
+		}
+		if stale.InputCleanup != nil {
+			s.retiredInputs = append(s.retiredInputs, stale.InputCleanup)
 		}
 		_ = os.RemoveAll(stale.CacheDir)
 	}
@@ -535,25 +509,24 @@ func (s *Server) ensureLibraryDASHSession(ctx context.Context, profileID, librar
 	if !ok {
 		return nil, errors.New("profile not found")
 	}
-	input, err := s.resolveLibraryPath(libraryID, rel)
+	resolved, err := s.resolveLibraryVFSInput(ctx, libraryID, rel)
 	if err != nil {
 		return nil, err
 	}
-	st, err := os.Stat(input)
-	if err != nil {
-		return nil, err
-	}
-	id := librarySessionID("dash", profileID, libraryID, rel, st, p)
+	id := librarySessionID("dash", profileID, libraryID, rel, resolved.Info, p)
 	if sess, ok := s.dynDASH.Get(id); ok {
+		resolved.Cleanup()
 		return sess, nil
 	}
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 	if sess, ok := s.dynDASH.Get(id); ok {
+		resolved.Cleanup()
 		return sess, nil
 	}
-	info, err := transcoder.ProbeFile(ctx, input)
+	info, err := transcoder.ProbeFile(ctx, resolved.Input)
 	if err != nil {
+		resolved.Cleanup()
 		return nil, err
 	}
 	opts := p.DASHOptions()
@@ -569,14 +542,18 @@ func (s *Server) ensureLibraryDASHSession(ctx context.Context, profileID, librar
 	cacheRoot := s.cacheRootFor("", "media-transcoder-dash")
 	cacheDir := filepath.Join(cacheRoot, id)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		resolved.Cleanup()
 		return nil, err
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
 	sourceKey := "dash|" + profileID + "|" + libraryID + "|" + rel
-	sess := &DynamicDASHSession{ID: id, InputPath: input, Options: opts, AudioOptions: audioOpts, Variants: buildDASHVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
+	sess := &DynamicDASHSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, Options: opts, AudioOptions: audioOpts, Variants: buildDASHVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
 	for _, stale := range s.dynDASH.ReplaceSourceSession(sess) {
 		if stale.cancel != nil {
 			stale.cancel()
+		}
+		if stale.InputCleanup != nil {
+			s.retiredInputs = append(s.retiredInputs, stale.InputCleanup)
 		}
 		_ = os.RemoveAll(stale.CacheDir)
 	}

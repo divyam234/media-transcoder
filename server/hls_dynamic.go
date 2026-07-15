@@ -58,6 +58,7 @@ type DynamicHLSSession struct {
 	Info            transcoder.MediaInfo
 	CreatedAt       time.Time
 	SourceKey       string
+	InputCleanup    func()
 	ctx             context.Context
 	cancel          context.CancelFunc
 	codecMu         sync.Mutex

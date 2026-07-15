@@ -39,7 +39,7 @@ func TestOptionalLibraryHLSVAAPIZeroCopyFlow(t *testing.T) {
 		CacheRoot:         t.TempDir(),
 		AllowedInputRoots: []string{root},
 		Libraries: map[string]LibraryConfig{
-			"media": {Root: root},
+			"media": {VFS: root},
 		},
 		Profiles: map[string]PlaybackProfile{
 			"vaapi": {
@@ -65,6 +65,7 @@ func TestOptionalLibraryHLSVAAPIZeroCopyFlow(t *testing.T) {
 		},
 	}
 	s := New(cfg)
+	t.Cleanup(s.Close)
 	base := "/play/hls/vaapi/media/" + url.PathEscape(name) + "/variant/720p"
 
 	playlist := request(t, s, base+"/video.m3u8")
