@@ -39,11 +39,13 @@ type DynamicHLSSessionResponse struct {
 }
 
 type DynamicHLSVariant struct {
-	Name      string                `json:"name"`
-	Width     int                   `json:"width,omitempty"`
-	Height    int                   `json:"height,omitempty"`
-	Bandwidth int                   `json:"bandwidth,omitempty"`
-	Options   transcoder.HLSOptions `json:"-"`
+	Name       string                     `json:"name"`
+	Width      int                        `json:"width,omitempty"`
+	Height     int                        `json:"height,omitempty"`
+	Bandwidth  int                        `json:"bandwidth,omitempty"`
+	VideoCodec transcoder.CodecDescriptor `json:"video_codec,omitempty"`
+	AudioCodec transcoder.CodecDescriptor `json:"audio_codec,omitempty"`
+	Options    transcoder.HLSOptions      `json:"-"`
 }
 
 type DynamicHLSSession struct {
@@ -55,8 +57,10 @@ type DynamicHLSSession struct {
 	PrewarmSegments int
 	Info            transcoder.MediaInfo
 	CreatedAt       time.Time
+	SourceKey       string
 	ctx             context.Context
 	cancel          context.CancelFunc
+	codecMu         sync.Mutex
 }
 
 type DynamicHLSManager struct {
@@ -64,6 +68,8 @@ type DynamicHLSManager struct {
 	sessions map[string]*DynamicHLSSession
 	locks    map[string]*sync.Mutex
 	sem      chan struct{}
+	wg       sync.WaitGroup
+	closed   bool
 }
 
 func NewDynamicHLSManager(maxConcurrent int) *DynamicHLSManager {
@@ -78,6 +84,56 @@ func (m *DynamicHLSManager) Add(s *DynamicHLSSession) {
 	defer m.mu.Unlock()
 	m.sessions[s.ID] = s
 }
+
+func (m *DynamicHLSManager) ReplaceSourceSession(s *DynamicHLSSession) []*DynamicHLSSession {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var stale []*DynamicHLSSession
+	if s.SourceKey != "" {
+		for id, existing := range m.sessions {
+			if id == s.ID || existing.SourceKey != s.SourceKey {
+				continue
+			}
+			stale = append(stale, existing)
+			delete(m.sessions, id)
+			for key := range m.locks {
+				if strings.HasPrefix(key, id+":") {
+					delete(m.locks, key)
+				}
+			}
+		}
+	}
+	m.sessions[s.ID] = s
+	return stale
+}
+
+func (m *DynamicHLSManager) beginBackground() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return false
+	}
+	m.wg.Add(1)
+	return true
+}
+
+func (m *DynamicHLSManager) endBackground() { m.wg.Done() }
+
+func (m *DynamicHLSManager) Wait() { m.wg.Wait() }
+
+func (m *DynamicHLSManager) StopAll() []*DynamicHLSSession {
+	m.mu.Lock()
+	m.closed = true
+	defer m.mu.Unlock()
+	out := make([]*DynamicHLSSession, 0, len(m.sessions))
+	for id, sess := range m.sessions {
+		out = append(out, sess)
+		delete(m.sessions, id)
+	}
+	m.locks = map[string]*sync.Mutex{}
+	return out
+}
+
 func (m *DynamicHLSManager) Get(id string) (*DynamicHLSSession, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -174,14 +230,55 @@ func (s *Server) dynamicHLSResponse(r *http.Request, sess *DynamicHLSSession) Dy
 	return DynamicHLSSessionResponse{ID: sess.ID, MasterURL: base + "/master.m3u8", PlaylistURL: base + "/video.m3u8", Duration: sess.Info.Duration, SegmentTime: sess.Options.SegmentSeconds, SegmentCount: segs, Variants: sess.Variants, Info: sess.Info}
 }
 
-func (s *Server) dynamicHLSMaster(_ context.Context, w http.ResponseWriter, r *http.Request) {
+func (s *Server) dynamicHLSMaster(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	id := routeParam(r, "id")
 	sess, ok := s.dynHLS.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("hls session not found"))
 		return
 	}
+	if err := s.ensureHLSCodecDescriptors(ctx, sess); err != nil {
+		s.logger.Warn("hls codec probe failed", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	s.writeHLSMaster(w, sess)
+}
+
+func (s *Server) ensureHLSCodecDescriptors(ctx context.Context, sess *DynamicHLSSession) error {
+	sess.codecMu.Lock()
+	defer sess.codecMu.Unlock()
+	for i := range sess.Variants {
+		v := sess.Variants[i]
+		needVideo := v.VideoCodec.CodecString == ""
+		needAudio := sess.Info.HasAudio && v.Options.AudioMode != transcoder.AudioSkip && v.AudioCodec.CodecString == ""
+		if !needVideo && !needAudio {
+			continue
+		}
+		segmentPath := hlsSegmentPath(sess, v, 0)
+		if err := s.ensureDynamicVariantSegment(ctx, sess, v, 0, segmentPath); err != nil {
+			return err
+		}
+		probePath := segmentPath
+		if hlsUsesFMP4(v) {
+			probePath = hlsInitPath(sess, v)
+		}
+		if needVideo {
+			codec, err := transcoder.ProbeCodec(probePath, false)
+			if err != nil {
+				return err
+			}
+			sess.Variants[i].VideoCodec = codec
+		}
+		if needAudio {
+			codec, err := transcoder.ProbeCodec(probePath, true)
+			if err != nil {
+				return err
+			}
+			sess.Variants[i].AudioCodec = codec
+		}
+	}
+	return nil
 }
 
 func (s *Server) writeHLSMaster(w http.ResponseWriter, sess *DynamicHLSSession) {
@@ -203,11 +300,26 @@ func buildHLSMasterPlaylist(sess *DynamicHLSSession) string {
 		if v.Name != "default" {
 			uri = "variant/" + url.PathEscape(v.Name) + "/video.m3u8"
 		}
-		codecs := "avc1.64001f"
-		if v.Options.AudioMode != transcoder.AudioSkip && sess.Info.HasAudio {
-			codecs += ",mp4a.40.2"
+		codecs := v.VideoCodec.CodecString
+		if codecs == "" {
+			codecs = "avc1.64001f"
 		}
-		b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\"\n%s\n", v.Bandwidth, v.Width, v.Height, codecs, uri))
+		if v.Options.AudioMode != transcoder.AudioSkip && sess.Info.HasAudio {
+			audioCodec := v.AudioCodec.CodecString
+			if audioCodec == "" {
+				audioCodec = "mp4a.40.2"
+			}
+			codecs += "," + audioCodec
+		}
+		fps := v.Options.FPS
+		if fps <= 0 {
+			fps = sess.Info.FPS
+		}
+		if fps > 0 {
+			b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=%.3f,CODECS=\"%s\"\n%s\n", v.Bandwidth, v.Width, v.Height, fps, codecs, uri))
+		} else {
+			b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\"\n%s\n", v.Bandwidth, v.Width, v.Height, codecs, uri))
+		}
 	}
 	return b.String()
 }
@@ -531,7 +643,11 @@ func (s *Server) prewarmHLS(sess *DynamicHLSSession, variant DynamicHLSVariant, 
 			continue
 		}
 		path := hlsSegmentPath(sess, variant, idx)
+		if !s.dynHLS.beginBackground() {
+			return
+		}
 		go func(i int, p string) {
+			defer s.dynHLS.endBackground()
 			if err := s.ensureDynamicVariantSegment(sess.ctx, sess, variant, i, p); err != nil {
 				if sess.ctx.Err() == nil {
 					s.logger.Debug("hls prewarm failed", "id", sess.ID, "variant", variant.Name, "index", i, "err", err)

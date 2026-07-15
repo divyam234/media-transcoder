@@ -237,7 +237,7 @@ func BuildPlan(profile Profile) (Plan, error) {
 		return Plan{}, fmt.Errorf("subtitle handling is not implemented in the direct bridge yet; set skip_subtitles=true")
 	}
 	encoder := VideoEncoder(profile.VideoCodec, profile.HardwareAccelerationType, profile.EnableHardwareEncoding)
-	base := TranscodeOptions{EncoderName: encoder, Width: profile.Width, Height: profile.Height, FPS: profile.FPS, CRF: profile.CRF, Preset: directPresetForEncoder(encoder, profile.Preset), GOPSize: profile.GOPSize, MaxBFrames: profile.MaxBFrames, FastStart: profile.FastStart || profile.Mode == ModeProgressive, AudioMode: profile.AudioMode, AudioCodec: profile.AudioCodec, AudioBitrate: profile.AudioBitrate, AudioChannels: profile.AudioChannels}
+	base := TranscodeOptions{EncoderName: encoder, HardwareDevice: profile.VaapiDevice, HardwareDecode: profile.EnableHardwareDecoding, Width: profile.Width, Height: profile.Height, FPS: profile.FPS, CRF: profile.CRF, Preset: directPresetForEncoder(encoder, profile.Preset), GOPSize: profile.GOPSize, MaxBFrames: profile.MaxBFrames, FastStart: profile.FastStart || profile.Mode == ModeProgressive, AudioMode: profile.AudioMode, AudioCodec: profile.AudioCodec, AudioBitrate: profile.AudioBitrate, AudioChannels: profile.AudioChannels}
 	plan := Plan{Mode: profile.Mode, InputPath: profile.InputPath, OutputPath: profile.OutputPath, EncoderName: encoder, VideoCodec: profile.VideoCodec, Hardware: profile.HardwareAccelerationType, UsesHardware: profile.EnableHardwareEncoding && profile.HardwareAccelerationType != HWNone, Progressive: base}
 	if plan.UsesHardware {
 		plan.Warnings = append(plan.Warnings, "hardware accelerator maps to a libavcodec hardware encoder; execution requires matching host GPU/device and FFmpeg build support")

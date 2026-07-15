@@ -66,13 +66,15 @@ type AudioProfile struct {
 }
 
 type VideoProfile struct {
-	Codec       string  `yaml:"codec" json:"codec"`
-	EncoderName string  `yaml:"encoder_name" json:"encoder_name"`
-	Preset      string  `yaml:"preset" json:"preset"`
-	CRF         int     `yaml:"crf" json:"crf"`
-	GOPSize     int     `yaml:"gop_size" json:"gop_size"`
-	MaxBFrames  int     `yaml:"max_b_frames" json:"max_b_frames"`
-	FPS         float64 `yaml:"fps" json:"fps"`
+	Codec          string  `yaml:"codec" json:"codec"`
+	EncoderName    string  `yaml:"encoder_name" json:"encoder_name"`
+	HardwareDevice string  `yaml:"hardware_device" json:"hardware_device"`
+	HardwareDecode bool    `yaml:"hardware_decode" json:"hardware_decode"`
+	Preset         string  `yaml:"preset" json:"preset"`
+	CRF            int     `yaml:"crf" json:"crf"`
+	GOPSize        int     `yaml:"gop_size" json:"gop_size"`
+	MaxBFrames     int     `yaml:"max_b_frames" json:"max_b_frames"`
+	FPS            float64 `yaml:"fps" json:"fps"`
 }
 
 func LoadConfigFile(path string) (Config, error) {
@@ -191,6 +193,8 @@ func (p PlaybackProfile) HLSOptions() transcoder.HLSOptions {
 	o.AudioBitrate = p.Audio.Bitrate
 	o.AudioChannels = p.Audio.Channels
 	o.EncoderName = p.Video.EncoderName
+	o.HardwareDevice = p.Video.HardwareDevice
+	o.HardwareDecode = p.Video.HardwareDecode
 	o.Preset = p.Video.Preset
 	o.CRF = p.Video.CRF
 	o.GOPSize = p.Video.GOPSize
@@ -362,6 +366,10 @@ func (s *Server) libraryHLS(ctx context.Context, w http.ResponseWriter, r *http.
 	}
 	switch kind {
 	case "master":
+		if err := s.ensureHLSCodecDescriptors(ctx, sess); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 		s.writeHLSMaster(w, sess)
 	case "playlist":
 		if variant == "" {
@@ -400,9 +408,15 @@ func (s *Server) libraryDASH(ctx context.Context, w http.ResponseWriter, r *http
 	}
 	switch kind {
 	case "manifest":
+		if err := s.ensureDASHCodecDescriptors(ctx, sess); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 		s.writeDASHManifest(w, sess)
 	case "segment":
 		s.dynamicDASHVariantSegment(ctx, w, requestWithDASHSessionVariantName(r, sess.ID, variant, name), variant)
+	case "audio_segment":
+		s.dynamicDASHAudioSegment(ctx, w, requestWithSessionAndName(r, sess.ID, name))
 	}
 }
 
@@ -436,6 +450,9 @@ func parseLibraryPlaybackPath(rest, protocol string) (mediaPath, kind, variant, 
 	case "dash":
 		if strings.HasSuffix(rest, "/manifest.mpd") {
 			return strings.TrimSuffix(rest, "/manifest.mpd"), "manifest", "", "", nil
+		}
+		if i := strings.LastIndex(rest, "/audio/segment/"); i >= 0 {
+			return rest[:i], "audio_segment", "audio", rest[i+len("/audio/segment/"):], nil
 		}
 		marker := "/variant/"
 		if i := strings.LastIndex(rest, marker); i >= 0 {
@@ -501,8 +518,14 @@ func (s *Server) ensureLibraryHLSSession(ctx context.Context, profileID, library
 		return nil, err
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
-	sess := &DynamicHLSSession{ID: id, InputPath: input, Options: opts, Variants: buildHLSVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel}
-	s.dynHLS.Add(sess)
+	sourceKey := "hls|" + profileID + "|" + libraryID + "|" + rel
+	sess := &DynamicHLSSession{ID: id, InputPath: input, Options: opts, Variants: buildHLSVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
+	for _, stale := range s.dynHLS.ReplaceSourceSession(sess) {
+		if stale.cancel != nil {
+			stale.cancel()
+		}
+		_ = os.RemoveAll(stale.CacheDir)
+	}
 	s.metrics.hlsSessions.Add(1)
 	return sess, nil
 }
@@ -534,17 +557,29 @@ func (s *Server) ensureLibraryDASHSession(ctx context.Context, profileID, librar
 		return nil, err
 	}
 	opts := p.DASHOptions()
-	if info.HasAudio && opts.AudioMode == "" {
-		opts.AudioMode = transcoder.AudioTranscode
+	audioOpts := opts.TranscodeOptions
+	if info.HasAudio {
+		if audioOpts.AudioMode == "" {
+			audioOpts.AudioMode = transcoder.AudioTranscode
+		}
+	} else {
+		audioOpts.AudioMode = transcoder.AudioSkip
 	}
+	opts.AudioMode = transcoder.AudioSkip
 	cacheRoot := s.cacheRootFor("", "media-transcoder-dash")
 	cacheDir := filepath.Join(cacheRoot, id)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, err
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
-	sess := &DynamicDASHSession{ID: id, InputPath: input, Options: opts, Variants: buildDASHVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel}
-	s.dynDASH.Add(sess)
+	sourceKey := "dash|" + profileID + "|" + libraryID + "|" + rel
+	sess := &DynamicDASHSession{ID: id, InputPath: input, Options: opts, AudioOptions: audioOpts, Variants: buildDASHVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
+	for _, stale := range s.dynDASH.ReplaceSourceSession(sess) {
+		if stale.cancel != nil {
+			stale.cancel()
+		}
+		_ = os.RemoveAll(stale.CacheDir)
+	}
 	s.metrics.dashSessions.Add(1)
 	return sess, nil
 }

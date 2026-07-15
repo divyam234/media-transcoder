@@ -89,11 +89,28 @@ func New(cfg Config) *Server {
 
 func (s *Server) Handler() http.Handler { return s.router }
 
+func (s *Server) Close() {
+	for _, sess := range s.dynHLS.StopAll() {
+		if sess.cancel != nil {
+			sess.cancel()
+		}
+	}
+	for _, sess := range s.dynDASH.StopAll() {
+		if sess.cancel != nil {
+			sess.cancel()
+		}
+	}
+	s.dynHLS.Wait()
+	s.dynDASH.Wait()
+}
+
 func (s *Server) routes(corsCfg CORSConfig) {
 	r := s.router
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(normalizeCORS(corsCfg)))
+	r.Get("/openapi.yaml", s.openAPISchema)
+	r.Get("/v1/openapi.yaml", s.openAPISchema)
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.secure)
@@ -126,6 +143,7 @@ func (s *Server) routes(corsCfg CORSConfig) {
 		r.Post("/v1/playback/dash/sessions", s.withTimeout(s.createDynamicDASHSession))
 		r.Get("/v1/playback/dash/{id}/manifest.mpd", s.withTimeout(s.dynamicDASHManifest))
 		r.Get("/v1/playback/dash/{id}/segment/{name}", s.withTimeout(s.dynamicDASHSegment))
+		r.Get("/v1/playback/dash/{id}/audio/segment/{name}", s.withTimeout(s.dynamicDASHAudioSegment))
 		r.Get("/v1/playback/dash/{id}/variant/{variant}/segment/{name}", s.withTimeout(s.dynamicDASHNamedVariantSegment))
 		r.Delete("/v1/playback/dash/{id}", s.withTimeout(s.deleteDynamicDASHSession))
 	})
@@ -244,6 +262,11 @@ func (s *Server) cacheRootFor(clientCacheDir, fallbackName string) string {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) openAPISchema(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/yaml")
+	_, _ = w.Write(transcoder.OpenAPISchema)
 }
 
 func (s *Server) capabilities(_ context.Context, w http.ResponseWriter, _ *http.Request) {

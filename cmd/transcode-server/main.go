@@ -99,7 +99,8 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	cfg.Logger = log
-	h := server.New(cfg).Handler()
+	app := server.New(cfg)
+	h := app.Handler()
 	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 5 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -111,6 +112,7 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
+		app.Close()
 	case err := <-errc:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("server failed", "err", err)

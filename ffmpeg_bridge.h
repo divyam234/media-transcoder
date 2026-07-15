@@ -19,6 +19,8 @@ typedef struct TCTranscodeOptions {
     int faststart;
     const char *preset;
     const char *encoder_name;
+    const char *hardware_device;
+    int hardware_decode;
     const char *format;
     const char *segment_filename;
     double hls_time;
@@ -36,12 +38,25 @@ typedef struct TCTranscodeOptions {
     volatile int *cancel_flag;
 } TCTranscodeOptions;
 
+typedef struct TCCodecInfo {
+    int media_type;
+    int codec_id;
+    int profile;
+    int level;
+    int sample_rate;
+    int channels;
+    char codec_name[64];
+    char codec_string[128];
+} TCCodecInfo;
+
 const char *tc_last_error(void);
 int tc_probe(const char *input_path, TCInfo *info);
+int tc_probe_codec(const char *input_path, int media_type, TCCodecInfo *info);
 int tc_transcode_video(const char *input_path, const char *output_path, const TCTranscodeOptions *opts);
 int tc_transcode_hls_video(const char *input_path, const char *playlist_path, const char *segment_filename, const TCTranscodeOptions *opts);
 int tc_transcode_segment_video(const char *input_path, const char *output_path, const TCTranscodeOptions *opts);
 int tc_transcode_fmp4_segment_video(const char *input_path, const char *output_path, const TCTranscodeOptions *opts);
+int tc_transcode_fmp4_segment_audio(const char *input_path, const char *output_path, const TCTranscodeOptions *opts);
 int tc_encoder_available(const char *encoder_name);
 int tc_transcode_dash_video(const char *input_path, const char *mpd_path, const TCTranscodeOptions *opts);
 volatile int *tc_cancel_alloc(void);

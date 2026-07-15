@@ -66,7 +66,7 @@ func TestDynamicHLSDefaultAudioIsTimestampTrimmed(t *testing.T) {
 	}
 }
 
-func TestDynamicDASHDefaultAudioIsTimestampTrimmed(t *testing.T) {
+func TestDynamicDASHIsVideoOnlyUntilSeparateAudioRepresentationsExist(t *testing.T) {
 	input := filepath.Join("..", "testdata", "avsample.mp4")
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 0, MaxConcurrentJobs: 1})
@@ -127,11 +127,13 @@ func TestDynamicDASHDefaultAudioIsTimestampTrimmed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("probe joined init+segment: %v", err)
 	}
-	if !info.HasAudio || info.AudioStreams != 1 {
-		t.Fatalf("dynamic dash segment missing audio: %+v", info)
+	if info.HasAudio || info.AudioStreams != 0 {
+		t.Fatalf("dynamic DASH unexpectedly muxed audio into video representation: %+v", info)
 	}
-	if info.Duration < 1.45 || info.Duration > 2.35 {
-		t.Fatalf("dynamic dash segment duration drift: %+v", info)
+	// Segment 1 starts at 1.75s and ends near 3.5s because DASH fragments now
+	// carry continuous tfdt decode times instead of resetting to zero.
+	if info.Duration < 3.20 || info.Duration > 3.90 {
+		t.Fatalf("dynamic dash segment timeline drift: %+v", info)
 	}
 }
 

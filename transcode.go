@@ -11,15 +11,17 @@ import (
 // TranscodeOptions controls one progressive video transcode. This is the core
 // direct-libav pipeline: demux, decode, filter, encode, mux. No ffmpeg process is spawned.
 type TranscodeOptions struct {
-	EncoderName string  `json:"encoder_name,omitempty"`
-	Width       int     `json:"width,omitempty"`
-	Height      int     `json:"height,omitempty"`
-	FPS         float64 `json:"fps,omitempty"`
-	CRF         int     `json:"crf,omitempty"`
-	Preset      string  `json:"preset,omitempty"`
-	GOPSize     int     `json:"gop_size,omitempty"`
-	MaxBFrames  int     `json:"max_b_frames,omitempty"`
-	FastStart   bool    `json:"fast_start,omitempty"`
+	EncoderName    string  `json:"encoder_name,omitempty"`
+	HardwareDevice string  `json:"hardware_device,omitempty"`
+	HardwareDecode bool    `json:"hardware_decode,omitempty"`
+	Width          int     `json:"width,omitempty"`
+	Height         int     `json:"height,omitempty"`
+	FPS            float64 `json:"fps,omitempty"`
+	CRF            int     `json:"crf,omitempty"`
+	Preset         string  `json:"preset,omitempty"`
+	GOPSize        int     `json:"gop_size,omitempty"`
+	MaxBFrames     int     `json:"max_b_frames,omitempty"`
+	FastStart      bool    `json:"fast_start,omitempty"`
 
 	// AudioMode controls audio handling. Supported runtime modes are "skip" and
 	// "copy". "transcode" is planned at API level and currently falls back to AAC
@@ -232,6 +234,46 @@ func TranscodeFMP4SegmentFromFile(ctx context.Context, path, outputPath string, 
 
 func TranscodeFMP4SegmentFromReadSeeker(ctx context.Context, name string, r io.ReadSeeker, outputPath string, opts TranscodeOptions) (*TranscodeResult, error) {
 	return TranscodeFMP4Segment(ctx, FromReadSeeker(name, r), outputPath, opts)
+}
+
+func TranscodeAudioFMP4Segment(ctx context.Context, src Source, outputPath string, opts TranscodeOptions) (*TranscodeResult, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	if outputPath == "" {
+		return nil, fmt.Errorf("output path is required")
+	}
+	if opts.Duration <= 0 {
+		return nil, fmt.Errorf("segment duration must be > 0")
+	}
+	opts.ApplyDefaults()
+	opts.AudioMode = AudioTranscode
+	prepared, err := prepareSource(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	if prepared.cleanup != nil {
+		defer prepared.cleanup()
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return nil, err
+	}
+	info, err := Probe(prepared.path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.HasAudio {
+		return nil, fmt.Errorf("input has no audio stream")
+	}
+	if err := transcodeFMP4SegmentAudio(ctx, prepared.path, outputPath, opts); err != nil {
+		_ = os.Remove(outputPath)
+		return nil, err
+	}
+	return &TranscodeResult{OutputPath: outputPath, Info: info}, nil
+}
+
+func TranscodeAudioFMP4SegmentFromFile(ctx context.Context, path, outputPath string, opts TranscodeOptions) (*TranscodeResult, error) {
+	return TranscodeAudioFMP4Segment(ctx, FromFile(path), outputPath, opts)
 }
 
 func TranscodeProgressive(ctx context.Context, src Source, outputPath string, opts TranscodeOptions) (*TranscodeResult, error) {

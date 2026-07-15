@@ -94,3 +94,27 @@ func TestHardwareEncoderMatrix(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildPlanPropagatesVAAPIDevice(t *testing.T) {
+	plan, err := BuildPlan(Profile{
+		Mode:                     ModeProgressive,
+		InputPath:                "input.mkv",
+		OutputPath:               "output.mp4",
+		VideoCodec:               VideoH264,
+		HardwareAccelerationType: HWVAAPI,
+		EnableHardwareEncoding:   true,
+		EnableHardwareDecoding:   true,
+		VaapiDevice:              "/dev/dri/renderD129",
+		AudioMode:                AudioSkip,
+		SkipSubtitles:            true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Progressive.HardwareDevice != "/dev/dri/renderD129" {
+		t.Fatalf("hardware device = %q", plan.Progressive.HardwareDevice)
+	}
+	if !plan.Progressive.HardwareDecode {
+		t.Fatal("hardware decode was not propagated")
+	}
+}

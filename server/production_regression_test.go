@@ -16,6 +16,7 @@ import (
 func TestDynamicHLSABRVariantsAreVirtualAndGeneratedOnDemand(t *testing.T) {
 	cache := t.TempDir()
 	srv := New(Config{RequestTimeout: 2 * time.Minute, MaxConcurrentJobs: 2})
+	t.Cleanup(srv.Close)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -67,8 +68,27 @@ func TestDynamicHLSABRVariantsAreVirtualAndGeneratedOnDemand(t *testing.T) {
 	if !strings.Contains(masterText, "variant/low/video.m3u8") || !strings.Contains(masterText, "variant/high/video.m3u8") {
 		t.Fatalf("master missing variant playlists:\n%s", masterText)
 	}
-	if entries, _ := os.ReadDir(filepath.Join(cache, created.ID)); len(entries) != 0 {
-		t.Fatalf("master request generated media files: %v", entries)
+	if !strings.Contains(masterText, `FRAME-RATE=`) || !strings.Contains(masterText, `CODECS="`) {
+		t.Fatalf("master missing probed stream metadata:\n%s", masterText)
+	}
+	sess, ok := srv.dynHLS.Get(created.ID)
+	if !ok || len(sess.Variants) != 2 {
+		t.Fatalf("missing HLS session variants after master probe")
+	}
+	for _, variant := range sess.Variants {
+		if variant.VideoCodec.CodecString == "" {
+			t.Fatalf("variant %s missing probed video codec", variant.Name)
+		}
+		if !strings.Contains(masterText, variant.VideoCodec.CodecString) {
+			t.Fatalf("master missing exact codec %q for %s:\n%s", variant.VideoCodec.CodecString, variant.Name, masterText)
+		}
+	}
+	for _, variant := range []string{"low", "high"} {
+		dir := filepath.Join(cache, created.ID, variant)
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("master should prime codec metadata for %s: entries=%v err=%v", variant, entries, err)
+		}
 	}
 
 	plResp, err := http.Get(ts.URL + "/v1/playback/hls/" + created.ID + "/variant/high/video.m3u8")
@@ -93,8 +113,8 @@ func TestDynamicHLSABRVariantsAreVirtualAndGeneratedOnDemand(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cache, created.ID, "high", "000000.ts")); err != nil {
 		t.Fatalf("variant segment not cached in variant directory: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(cache, created.ID, "low", "000000.ts")); !os.IsNotExist(err) {
-		t.Fatalf("requesting high variant should not generate low variant, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(cache, created.ID, "low", "000000.ts")); err != nil {
+		t.Fatalf("master codec probing should have primed low variant: %v", err)
 	}
 }
 

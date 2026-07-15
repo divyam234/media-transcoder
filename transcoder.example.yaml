@@ -31,6 +31,9 @@ profiles:
     video:
       codec: h264
       encoder_name: libx264
+      # Required for *_vaapi encoders; defaults to /dev/dri/renderD128.
+      # hardware_device: /dev/dri/renderD128
+      # hardware_decode: true # VAAPI decode + scale_vaapi zero-copy path
       preset: veryfast
       crf: 28
       gop_size: 96

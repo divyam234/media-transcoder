@@ -128,3 +128,24 @@ func TestLibraryPathTraversalRejected(t *testing.T) {
 		t.Fatalf("expected traversal rejection, got status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestPlaybackProfilePropagatesVAAPIDevice(t *testing.T) {
+	profile := PlaybackProfile{
+		SegmentSeconds: 4,
+		Video: VideoProfile{
+			EncoderName:    "h264_vaapi",
+			HardwareDevice: "/dev/dri/renderD129",
+			HardwareDecode: true,
+		},
+	}
+	opts := profile.HLSOptions()
+	if opts.EncoderName != "h264_vaapi" {
+		t.Fatalf("encoder = %q", opts.EncoderName)
+	}
+	if opts.HardwareDevice != "/dev/dri/renderD129" {
+		t.Fatalf("hardware device = %q", opts.HardwareDevice)
+	}
+	if !opts.HardwareDecode {
+		t.Fatal("hardware decode was not propagated")
+	}
+}
