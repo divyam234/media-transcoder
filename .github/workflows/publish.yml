@@ -18,6 +18,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          submodules: recursive
+          persist-credentials: false
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
