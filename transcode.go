@@ -83,7 +83,7 @@ func (o *TranscodeOptions) ApplyDefaults() {
 		o.CRF = 28
 	}
 	if o.Preset == "" {
-		o.Preset = "ultrafast"
+		o.Preset = string(PresetFastest)
 	}
 	if o.GOPSize <= 0 {
 		o.GOPSize = 48

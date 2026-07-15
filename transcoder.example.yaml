@@ -78,7 +78,7 @@ profiles:
     video:
       codec: h264
       encoder_name: h264_nvenc
-      preset: ultrafast
+      preset: fastest
       crf: 23
       gop_size: 96
       max_b_frames: 0
@@ -152,7 +152,7 @@ profiles:
     video:
       codec: h264
       encoder_name: h264_nvenc
-      preset: ultrafast
+      preset: fastest
       crf: 23
       gop_size: 96
       max_b_frames: 0

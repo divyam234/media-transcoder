@@ -893,10 +893,10 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     AVDictionary *enc_opts = NULL;
     char quality_buf[32]; snprintf(quality_buf, sizeof(quality_buf), "%d", crf);
     if (strcmp(encoder->name, "libx264") == 0 || strcmp(encoder->name, "libx265") == 0) { av_dict_set(&enc_opts, "preset", preset, 0); av_dict_set(&enc_opts, "crf", quality_buf, 0); }
-    else if (strstr(encoder->name, "_nvenc")) { av_dict_set(&enc_opts, "preset", preset, 0); av_dict_set(&enc_opts, "cq", quality_buf, 0); av_dict_set(&enc_opts, "rc", "vbr", 0); }
-    else if (strstr(encoder->name, "_qsv")) { av_dict_set(&enc_opts, "preset", preset, 0); av_dict_set(&enc_opts, "global_quality", quality_buf, 0); }
+    else if (strstr(encoder->name, "_nvenc")) { if (preset[0]) av_dict_set(&enc_opts, "preset", preset, 0); av_dict_set(&enc_opts, "cq", quality_buf, 0); av_dict_set(&enc_opts, "rc", "vbr", 0); }
+    else if (strstr(encoder->name, "_qsv")) { if (preset[0]) av_dict_set(&enc_opts, "preset", preset, 0); av_dict_set(&enc_opts, "global_quality", quality_buf, 0); }
     else if (strstr(encoder->name, "_vaapi")) { av_dict_set(&enc_opts, "global_quality", quality_buf, 0); }
-    else if (strstr(encoder->name, "_amf")) { av_dict_set(&enc_opts, "quality", "speed", 0); av_dict_set(&enc_opts, "qp_i", quality_buf, 0); av_dict_set(&enc_opts, "qp_p", quality_buf, 0); }
+    else if (strstr(encoder->name, "_amf")) { if (preset[0]) av_dict_set(&enc_opts, "quality", preset, 0); av_dict_set(&enc_opts, "qp_i", quality_buf, 0); av_dict_set(&enc_opts, "qp_p", quality_buf, 0); }
     else if (strstr(encoder->name, "_videotoolbox")) { av_dict_set(&enc_opts, "q:v", quality_buf, 0); }
     ret = avcodec_open2(enc, encoder, &enc_opts); av_dict_free(&enc_opts);
     if (ret < 0) { set_av_error("avcodec_open2 encoder", ret); if (audio_filter_graph) avfilter_graph_free(&audio_filter_graph); if (aenc) avcodec_free_context(&aenc); avcodec_free_context(&enc); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return ret; }

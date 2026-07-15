@@ -140,6 +140,10 @@ func (s *Server) routes(corsCfg CORSConfig) {
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.secure)
+		r.Get("/", s.withTimeout(s.uiIndex))
+		r.Get("/ui/library/{library}/*", s.withTimeout(s.uiBrowse))
+		r.Get("/ui/player/{library}/*", s.withTimeout(s.uiPlayer))
+		r.Get("/media/{library}/*", s.withTimeout(s.rawLibraryMedia))
 		r.Get("/healthz", s.health)
 		r.Get("/v1/capabilities", s.withTimeout(s.capabilities))
 		r.Get("/v1/capabilities/runtime", s.withTimeout(s.runtimeCapabilities))

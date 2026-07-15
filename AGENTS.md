@@ -9,7 +9,7 @@ Requires Go 1.26, CGO, and FFmpeg 8.1+ development libraries for:
 - `libavutil`
 - `libavfilter`
 
-Use the repository recipes so the Nix FFmpeg environment is applied:
+Use the repository recipes. They prefer the active `pkg-config` environment and, on Nix systems, discover FFmpeg development outputs from `/nix/store` without hardcoded store hashes. `FFMPEG_DEV` and `FFMPEG_LIB` remain optional overrides.
 
 ```bash
 just build
@@ -90,6 +90,19 @@ Bitrates accept numeric bits per second or readable values such as `128kbps`, `2
 
 Keep `transcoder.example.yaml` loadable. `TestExampleConfigLoads` protects it.
 
+## Web UI
+
+The root route serves a Go-template library browser. Keep it build-step-free: Tailwind browser CDN, Plyr, and hls.js are loaded from CDN.
+
+```text
+GET /
+GET /ui/library/{library}/{relative-directory...}
+GET /ui/player/{library}/{relative-media-path...}
+GET /media/{library}/{relative-media-path...}
+```
+
+`/media` must preserve HTTP range support through the rclone VFS handle. Unsupported browser formats should use configured HLS profiles rather than raw delivery.
+
 ## Playback routes
 
 ```text
@@ -106,7 +119,7 @@ The checked-in example uses NVENC and VAAPI only.
 - NVENC encoder: `h264_nvenc`
 - VAAPI encoder: `h264_vaapi`
 - VAAPI device default example: `/dev/dri/renderD128`
-- NVENC preset used by the example: `ultrafast`
+- Common preset used by the example: `fastest` (mapped to NVENC `p1`)
 - The bridge does not pass a preset option to VAAPI
 
 Do not add software profiles to the production example unless explicitly requested.

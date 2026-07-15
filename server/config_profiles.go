@@ -158,7 +158,7 @@ func applyProfileDefaults(p *PlaybackProfile) {
 		p.Audio.Channels = 2
 	}
 	if p.Video.Preset == "" {
-		p.Video.Preset = "ultrafast"
+		p.Video.Preset = string(transcoder.PresetFastest)
 	}
 	if p.Video.CRF <= 0 {
 		p.Video.CRF = 28

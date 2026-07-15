@@ -110,7 +110,7 @@ func (p *Profile) applyDefaults() {
 		p.CRF = 28
 	}
 	if p.Preset == "" {
-		p.Preset = "veryfast"
+		p.Preset = string(PresetBalanced)
 	}
 	if p.GOPSize <= 0 {
 		p.GOPSize = 48
@@ -213,13 +213,7 @@ func VideoEncoder(codec VideoCodec, hw HardwareAccelerationType, enableHW bool) 
 }
 
 func directPresetForEncoder(encoder, preset string) string {
-	if preset == "" {
-		preset = "veryfast"
-	}
-	if strings.Contains(encoder, "_vaapi") || strings.Contains(encoder, "_amf") || strings.Contains(encoder, "_videotoolbox") {
-		return preset
-	}
-	return preset
+	return PresetForEncoder(encoder, preset)
 }
 
 func BuildPlan(profile Profile) (Plan, error) {

@@ -10,6 +10,8 @@ On-demand HLS and DASH transcoding with FFmpeg libraries, rclone VFS inputs, ada
 
 ## Build
 
+`just` uses the active `pkg-config` environment first. On Nix systems it automatically discovers FFmpeg development libraries from `/nix/store`; no store hash is hardcoded. Set `FFMPEG_DEV` or `FFMPEG_LIB` only to override detection.
+
 ```bash
 just build
 ```
@@ -57,7 +59,7 @@ profiles:
     video:
       codec: h264
       encoder_name: h264_nvenc
-      preset: ultrafast
+      preset: fastest
       crf: 23
       gop_size: 96
       max_b_frames: 0
@@ -88,6 +90,16 @@ vfs: ":s3,provider=AWS,env_auth=true:media-bucket/movies"
 ```
 
 Bitrates accept values such as `128kbps`, `2.8Mbps`, and plain bits per second. Rclone size options accept values such as `64MiB` and `250GiB`.
+
+## Web UI
+
+Open:
+
+```text
+http://localhost:8080/
+```
+
+The server-rendered UI lists libraries, browses VFS directories, and plays media with Plyr. Browser-native formats use the range-capable `/media/{library}/{path...}` route. Other media formats use the selected HLS profile.
 
 ## Playback URLs
 
@@ -131,12 +143,24 @@ vlc "http://localhost:8080/play/hls/hls-h264-nvenc/movies/Action/Movie.mkv/maste
 
 ## Hardware profiles
 
+Use the same preset names for every encoder:
+
+| Common preset | x264/x265 | NVENC | QSV | AMF | VAAPI / VideoToolbox / V4L2M2M / RKMPP |
+| --- | --- | --- | --- | --- | --- |
+| `fastest` | `ultrafast` | `p1` | `veryfast` | `speed` | not passed |
+| `fast` | `veryfast` | `p2` | `faster` | `speed` | not passed |
+| `balanced` | `medium` | `p4` | `medium` | `balanced` | not passed |
+| `quality` | `slow` | `p6` | `slower` | `quality` | not passed |
+| `best` | `veryslow` | `p7` | `veryslow` | `quality` | not passed |
+
+Encoder-specific aliases such as `ultrafast`, `p1`, `medium`, `slow`, and `p7` are normalized to the common preset names before reaching libav.
+
 NVENC:
 
 ```yaml
 video:
   encoder_name: h264_nvenc
-  preset: ultrafast
+  preset: fastest
 ```
 
 VAAPI:
@@ -146,6 +170,7 @@ video:
   encoder_name: h264_vaapi
   hardware_device: "/dev/dri/renderD128"
   hardware_decode: true
+  preset: fastest # accepted, but VAAPI receives no preset option
 ```
 
 ## Main routes

@@ -111,7 +111,7 @@ func withCancelFlag(ctx context.Context, fn func(*C.int) C.int) C.int {
 func transcodeVideo(ctx context.Context, input, output string, opts TranscodeOptions) error {
 	cin := C.CString(input)
 	cout := C.CString(output)
-	cpreset := C.CString(opts.Preset)
+	cpreset := C.CString(PresetForEncoder(opts.EncoderName, opts.Preset))
 	cencoder := C.CString(opts.EncoderName)
 	chardwareDevice := C.CString(opts.HardwareDevice)
 	caudioCodec := C.CString(opts.AudioCodec)
@@ -156,7 +156,7 @@ func transcodeHLSVideo(ctx context.Context, input, playlist, segmentPattern stri
 	cin := C.CString(input)
 	cout := C.CString(playlist)
 	cseg := C.CString(segmentPattern)
-	cpreset := C.CString(opts.Preset)
+	cpreset := C.CString(PresetForEncoder(opts.EncoderName, opts.Preset))
 	cencoder := C.CString(opts.EncoderName)
 	chardwareDevice := C.CString(opts.HardwareDevice)
 	cplaylistType := C.CString(opts.PlaylistType)
@@ -215,7 +215,7 @@ func EncoderAvailable(name string) bool {
 func transcodeDASHVideo(ctx context.Context, input, mpd string, opts DASHOptions) error {
 	cin := C.CString(input)
 	cout := C.CString(mpd)
-	cpreset := C.CString(opts.Preset)
+	cpreset := C.CString(PresetForEncoder(opts.EncoderName, opts.Preset))
 	cencoder := C.CString(opts.EncoderName)
 	chardwareDevice := C.CString(opts.HardwareDevice)
 	caudioCodec := C.CString(opts.AudioCodec)
@@ -254,7 +254,7 @@ func transcodeDASHVideo(ctx context.Context, input, mpd string, opts DASHOptions
 func transcodeSegmentVideo(ctx context.Context, input, output string, opts TranscodeOptions) error {
 	cin := C.CString(input)
 	cout := C.CString(output)
-	cpreset := C.CString(opts.Preset)
+	cpreset := C.CString(PresetForEncoder(opts.EncoderName, opts.Preset))
 	cencoder := C.CString(opts.EncoderName)
 	chardwareDevice := C.CString(opts.HardwareDevice)
 	caudioCodec := C.CString(opts.AudioCodec)
@@ -297,7 +297,7 @@ func transcodeSegmentVideo(ctx context.Context, input, output string, opts Trans
 func transcodeFMP4SegmentVideo(ctx context.Context, input, output string, opts TranscodeOptions) error {
 	cin := C.CString(input)
 	cout := C.CString(output)
-	cpreset := C.CString(opts.Preset)
+	cpreset := C.CString(PresetForEncoder(opts.EncoderName, opts.Preset))
 	cencoder := C.CString(opts.EncoderName)
 	chardwareDevice := C.CString(opts.HardwareDevice)
 	caudioCodec := C.CString(opts.AudioCodec)
