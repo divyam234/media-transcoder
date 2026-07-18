@@ -160,11 +160,17 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Libraries) < 3 {
+	if len(cfg.Libraries) < 4 {
 		t.Fatalf("expected production library examples, got %d", len(cfg.Libraries))
+	}
+	if cfg.Libraries["cached_movies"].HTTP == nil || cfg.Libraries["cached_movies"].HTTP.BaseURL != "http://media-cache/media/" {
+		t.Fatalf("HTTP library example was not loaded: %#v", cfg.Libraries["cached_movies"].HTTP)
 	}
 	if len(cfg.Profiles) < 3 {
 		t.Fatalf("expected HLS and DASH profile examples, got %d", len(cfg.Profiles))
+	}
+	if len(cfg.Server.HTTPAllowedHosts) != 2 || cfg.Server.HTTPAllowedHosts[0] != "media-cache" {
+		t.Fatalf("HTTP allowed hosts were not loaded: %v", cfg.Server.HTTPAllowedHosts)
 	}
 	if got := cfg.Profiles["hls-h264-nvenc"].Variants[3].VideoBitrate; got != 5500000 {
 		t.Fatalf("human-readable example bitrate parsed as %d", got)

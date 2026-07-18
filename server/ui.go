@@ -48,14 +48,14 @@ var uiTemplates = template.Must(template.New("ui").Parse(`
 {{template "head" .}}
 <div class="mb-6">
   <h1 class="text-2xl font-semibold">Libraries</h1>
-  <p class="mt-1 text-sm text-zinc-500">Browse configured rclone VFS libraries.</p>
+  <p class="mt-1 text-sm text-zinc-500">Browse VFS libraries or use configured HTTP libraries through profile playback URLs.</p>
 </div>
 <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
 {{range .Libraries}}
-  <a href="{{.URL}}" class="rounded-lg border border-zinc-800 bg-zinc-900 p-4 hover:border-zinc-700">
+  {{if .URL}}<a href="{{.URL}}" class="rounded-lg border border-zinc-800 bg-zinc-900 p-4 hover:border-zinc-700">{{else}}<div class="rounded-lg border border-zinc-800 bg-zinc-900 p-4">{{end}}
     <div class="font-medium">{{.ID}}</div>
-    <div class="mt-1 truncate text-xs text-zinc-500">{{.VFS}}</div>
-  </a>
+    <div class="mt-1 truncate text-xs text-zinc-500">{{.Source}}</div>
+  {{if .URL}}</a>{{else}}</div>{{end}}
 {{else}}
   <div class="rounded-lg border border-zinc-800 p-6 text-sm text-zinc-500">No libraries configured.</div>
 {{end}}
@@ -204,9 +204,9 @@ var uiTemplates = template.Must(template.New("ui").Parse(`
 `))
 
 type uiLibrary struct {
-	ID  string
-	VFS string
-	URL string
+	ID     string
+	Source string
+	URL    string
 }
 
 type uiEntry struct {
@@ -234,7 +234,13 @@ func (s *Server) uiIndex(_ context.Context, w http.ResponseWriter, _ *http.Reque
 	libraries := make([]uiLibrary, 0, len(ids))
 	for _, id := range ids {
 		lib := s.libraries[id]
-		libraries = append(libraries, uiLibrary{ID: id, VFS: lib.VFS, URL: "/ui/library/" + url.PathEscape(id) + "/"})
+		item := uiLibrary{ID: id, Source: lib.VFS}
+		if lib.HTTP != nil {
+			item.Source = lib.HTTP.BaseURL + " (profile playback)"
+		} else {
+			item.URL = "/ui/library/" + url.PathEscape(id) + "/"
+		}
+		libraries = append(libraries, item)
 	}
 	s.configMu.RUnlock()
 	renderUI(w, "index", map[string]any{"Title": "Libraries", "Libraries": libraries})

@@ -15,11 +15,18 @@ func prepareSource(ctx context.Context, src Source) (preparedSource, error) {
 	if src.Path != "" {
 		return preparedSource{path: src.Path}, nil
 	}
-	if src.ReadSeeker == nil {
-		return preparedSource{}, errors.New("source must have Path or ReadSeeker")
-	}
 	if err := checkContext(ctx); err != nil {
 		return preparedSource{}, err
+	}
+	if src.OpenReadSeeker != nil {
+		path, cleanup, err := RegisterReadSeekerFactory(src.Name, src.OpenReadSeeker)
+		if err != nil {
+			return preparedSource{}, err
+		}
+		return preparedSource{path: path, cleanup: cleanup}, nil
+	}
+	if src.ReadSeeker == nil {
+		return preparedSource{}, errors.New("source must have Path, ReadSeeker, or OpenReadSeeker")
 	}
 	_, _ = src.ReadSeeker.Seek(0, io.SeekStart)
 	path, cleanup, err := RegisterReadSeekerInput(src.Name, src.ReadSeeker)

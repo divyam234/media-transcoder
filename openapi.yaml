@@ -110,7 +110,7 @@ paths:
                 $ref: "#/components/schemas/Metrics"
   /v1/probe:
     post:
-      summary: Probe an input file
+      summary: Probe a local file or seekable HTTP range source
       requestBody:
         required: true
         content:
@@ -151,7 +151,7 @@ paths:
             schema:
               $ref: "#/components/schemas/DynamicHLSSessionRequest"
       responses:
-        "200":
+        "201":
           description: Dynamic HLS session
           content:
             application/json:
@@ -261,7 +261,7 @@ paths:
             schema:
               $ref: "#/components/schemas/DynamicDASHSessionRequest"
       responses:
-        "200":
+        "201":
           description: Dynamic DASH session
           content:
             application/json:
@@ -492,11 +492,33 @@ components:
       type: object
       properties:
         error: { type: string }
-    ProbeRequest:
+    MediaInput:
       type: object
-      required: [input_path]
+      description: Supply exactly one of input_path or input_url. HTTP URLs must match the server allowlist and support byte ranges.
       properties:
-        input_path: { type: string }
+        input_path:
+          type: string
+          description: Local filesystem input path.
+        input_url:
+          type: string
+          format: uri
+          description: Absolute HTTP or HTTPS byte-range source.
+        input_headers:
+          type: object
+          writeOnly: true
+          additionalProperties:
+            type: string
+          description: Optional headers sent to the HTTP source. Range, If-Range, and Accept-Encoding are managed by the transcoder.
+      oneOf:
+        - required: [input_path]
+          not:
+            required: [input_url]
+        - required: [input_url]
+          not:
+            required: [input_path]
+    ProbeRequest:
+      allOf:
+        - $ref: "#/components/schemas/MediaInput"
     MediaInfo:
       type: object
       properties:
@@ -640,18 +662,18 @@ components:
         video_bitrate: { type: integer }
         crf: { type: integer }
     DynamicHLSSessionRequest:
-      type: object
-      required: [input_path]
-      properties:
-        input_path: { type: string }
-        options:
-          $ref: "#/components/schemas/HLSOptions"
-        variants:
-          type: array
-          items:
-            $ref: "#/components/schemas/LadderVariant"
-        cache_dir: { type: string }
-        prewarm_segments: { type: integer, minimum: 0 }
+      allOf:
+        - $ref: "#/components/schemas/MediaInput"
+        - type: object
+          properties:
+            options:
+              $ref: "#/components/schemas/HLSOptions"
+            variants:
+              type: array
+              items:
+                $ref: "#/components/schemas/LadderVariant"
+            cache_dir: { type: string }
+            prewarm_segments: { type: integer, minimum: 0 }
     DynamicHLSSessionResponse:
       type: object
       properties:
@@ -673,14 +695,18 @@ components:
         info:
           $ref: "#/components/schemas/MediaInfo"
     DynamicDASHSessionRequest:
-      type: object
-      required: [input_path]
-      properties:
-        input_path: { type: string }
-        options:
-          $ref: "#/components/schemas/DASHOptions"
-        cache_dir: { type: string }
-        prewarm_segments: { type: integer, minimum: 0 }
+      allOf:
+        - $ref: "#/components/schemas/MediaInput"
+        - type: object
+          properties:
+            options:
+              $ref: "#/components/schemas/DASHOptions"
+            variants:
+              type: array
+              items:
+                $ref: "#/components/schemas/LadderVariant"
+            cache_dir: { type: string }
+            prewarm_segments: { type: integer, minimum: 0 }
     DynamicDASHSessionResponse:
       type: object
       properties:
@@ -707,13 +733,14 @@ components:
         hardware_acceleration_type:
           $ref: "#/components/schemas/HardwareAccelerationType"
     DevicePlanRequest:
-      type: object
-      required: [input_path, output_path]
-      properties:
-        input_path: { type: string }
-        output_path: { type: string }
-        capabilities:
-          $ref: "#/components/schemas/DeviceCapabilities"
+      allOf:
+        - $ref: "#/components/schemas/MediaInput"
+        - type: object
+          required: [output_path]
+          properties:
+            output_path: { type: string }
+            capabilities:
+              $ref: "#/components/schemas/DeviceCapabilities"
     Plan:
       type: object
       properties:

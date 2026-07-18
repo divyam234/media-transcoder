@@ -5,16 +5,23 @@ import (
 	"io"
 )
 
-// Source describes media input. ReadSeeker is connected directly to libav through
-// a custom AVIOContext, so seekable remote streams do not require materialization.
+// Source describes media input. ReadSeeker and OpenReadSeeker are connected
+// directly to libav through a custom AVIOContext, so seekable remote streams do
+// not require materialization. OpenReadSeeker is preferred when libav may open
+// the same source more than once because each open receives an independent
+// stream.
 type Source struct {
-	Path       string
-	ReadSeeker io.ReadSeeker
-	Name       string
+	Path           string
+	ReadSeeker     io.ReadSeeker
+	OpenReadSeeker func() (io.ReadSeekCloser, error)
+	Name           string
 }
 
 func FromFile(path string) Source                        { return Source{Path: path, Name: path} }
 func FromReadSeeker(name string, r io.ReadSeeker) Source { return Source{Name: name, ReadSeeker: r} }
+func FromReadSeekerFactory(name string, open func() (io.ReadSeekCloser, error)) Source {
+	return Source{Name: name, OpenReadSeeker: open}
+}
 
 // MediaInfo contains basic video-stream metadata.
 type MediaInfo struct {

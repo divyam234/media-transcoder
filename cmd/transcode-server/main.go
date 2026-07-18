@@ -29,6 +29,7 @@ func main() {
 	var cacheRoot string
 	var vfsCacheRoot string
 	var allowedRoots []string
+	var httpAllowedHosts []string
 	var debug bool
 	var corsOrigins string
 	var corsCredentials bool
@@ -42,6 +43,7 @@ func main() {
 	pflag.StringVar(&cacheRoot, "cache-root", "", "server-owned HLS/DASH segment cache root; client cache_dir is ignored when set")
 	pflag.StringVar(&vfsCacheRoot, "vfs-cache-root", "", "rclone VFS cache directory; empty uses rclone default")
 	pflag.StringArrayVar(&allowedRoots, "allow-input-root", nil, "allowed input root; repeat to allow multiple roots; empty allows any path")
+	pflag.StringArrayVar(&httpAllowedHosts, "http-allowed-host", nil, "allowed input_url host, host:port, *.domain, or *; repeat for multiple hosts; empty disables HTTP inputs")
 	pflag.BoolVar(&debug, "debug", false, "enable debug logging")
 	pflag.StringVar(&corsOrigins, "cors-origins", "*", "comma-separated CORS allowed origins; use * for public playback")
 	pflag.BoolVar(&corsCredentials, "cors-credentials", false, "allow credentialed CORS requests; do not use with wildcard origins")
@@ -53,7 +55,7 @@ func main() {
 	}
 
 	keys := splitCSV(apiKeys)
-	cfg := server.Config{RequestTimeout: timeout, APIKeys: keys, RateLimitPerMinute: rateLimit, MaxConcurrentJobs: maxJobs, CacheRoot: cacheRoot, VFSCacheRoot: vfsCacheRoot, AllowedInputRoots: allowedRoots, CORS: server.CORSConfig{AllowedOrigins: splitCSVDefault(corsOrigins, []string{"*"}), AllowCredentials: corsCredentials}}
+	cfg := server.Config{RequestTimeout: timeout, APIKeys: keys, RateLimitPerMinute: rateLimit, MaxConcurrentJobs: maxJobs, CacheRoot: cacheRoot, VFSCacheRoot: vfsCacheRoot, AllowedInputRoots: allowedRoots, HTTPAllowedHosts: httpAllowedHosts, CORS: server.CORSConfig{AllowedOrigins: splitCSVDefault(corsOrigins, []string{"*"}), AllowCredentials: corsCredentials}}
 	if configPath != "" {
 		fileCfg, err := server.LoadConfigFile(configPath)
 		if err != nil {
@@ -87,6 +89,9 @@ func main() {
 		}
 		if pflag.CommandLine.Changed("allow-input-root") {
 			cfg.AllowedInputRoots = allowedRoots
+		}
+		if pflag.CommandLine.Changed("http-allowed-host") {
+			cfg.HTTPAllowedHosts = httpAllowedHosts
 		}
 		if pflag.CommandLine.Changed("cors-origins") {
 			cfg.CORS.AllowedOrigins = splitCSVDefault(corsOrigins, []string{"*"})

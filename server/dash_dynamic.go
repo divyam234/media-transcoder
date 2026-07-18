@@ -17,7 +17,9 @@ import (
 )
 
 type DynamicDASHSessionRequest struct {
-	InputPath       string                     `json:"input_path"`
+	InputPath       string                     `json:"input_path,omitempty"`
+	InputURL        string                     `json:"input_url,omitempty"`
+	InputHeaders    map[string]string          `json:"input_headers,omitempty"`
 	Options         transcoder.DASHOptions     `json:"options"`
 	Variants        []transcoder.LadderVariant `json:"variants,omitempty"`
 	CacheDir        string                     `json:"cache_dir,omitempty"`
@@ -170,20 +172,23 @@ func (s *Server) createDynamicDASHSession(ctx context.Context, w http.ResponseWr
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.InputPath == "" {
-		writeError(w, http.StatusBadRequest, errors.New("input_path is required"))
-		return
-	}
 	requestedAudioMode := req.Options.AudioMode
 	req.Options.ApplyDefaults()
 	if req.Options.SegmentSeconds <= 0 {
 		req.Options.SegmentSeconds = 4
 	}
-	if err := s.validateInputPath(req.InputPath); err != nil {
-		writeError(w, http.StatusForbidden, err)
+	resolved, err := s.resolveInput(ctx, req.InputPath, req.InputURL, req.InputHeaders)
+	if err != nil {
+		writeError(w, inputErrorStatus(err), err)
 		return
 	}
-	info, err := transcoder.ProbeFile(ctx, req.InputPath)
+	keepInput := false
+	defer func() {
+		if !keepInput && resolved.Cleanup != nil {
+			resolved.Cleanup()
+		}
+	}()
+	info, err := transcoder.ProbeFile(ctx, resolved.Input)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -206,9 +211,10 @@ func (s *Server) createDynamicDASHSession(ctx context.Context, w http.ResponseWr
 		return
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
-	sess := &DynamicDASHSession{ID: id, InputPath: req.InputPath, Options: req.Options, AudioOptions: audioOpts, CacheDir: cacheDir, PrewarmSegments: req.PrewarmSegments, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel}
+	sess := &DynamicDASHSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, SourceKey: resolved.SourceKey, Options: req.Options, AudioOptions: audioOpts, CacheDir: cacheDir, PrewarmSegments: req.PrewarmSegments, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel}
 	sess.Variants = buildDASHVariants(req.Options, req.Variants, info)
 	s.dynDASH.Add(sess)
+	keepInput = true
 	s.metrics.dashSessions.Add(1)
 	writeJSON(w, http.StatusCreated, s.dynamicDASHResponse(sess))
 }
@@ -259,6 +265,11 @@ func (s *Server) deleteDynamicDASHSession(_ context.Context, w http.ResponseWrit
 	}
 	if sess.cancel != nil {
 		sess.cancel()
+	}
+	if sess.InputCleanup != nil {
+		s.sessionMu.Lock()
+		s.retiredInputs = append(s.retiredInputs, sess.InputCleanup)
+		s.sessionMu.Unlock()
 	}
 	_ = os.RemoveAll(sess.CacheDir)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "deleted"})

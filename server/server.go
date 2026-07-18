@@ -38,10 +38,13 @@ type Config struct {
 	VFSCacheRoot string
 	// AllowedInputRoots restricts input_path to these roots. Empty means allow any path.
 	AllowedInputRoots []string
-	CORS              CORSConfig
-	ConfigPath        string
-	Libraries         map[string]LibraryConfig
-	Profiles          map[string]PlaybackProfile
+	// HTTPAllowedHosts enables input_url for exact hosts, host:port values, wildcard
+	// subdomains such as *.example.com, or * for any host. Empty disables input_url.
+	HTTPAllowedHosts []string
+	CORS             CORSConfig
+	ConfigPath       string
+	Libraries        map[string]LibraryConfig
+	Profiles         map[string]PlaybackProfile
 }
 
 // CORSConfig controls browser access to the dynamic playback API.
@@ -68,6 +71,7 @@ type Server struct {
 	cacheRoot         string
 	vfsCacheRoot      string
 	allowedInputRoots []string
+	httpAllowedHosts  []string
 	configPath        string
 	libraries         map[string]LibraryConfig
 	profiles          map[string]PlaybackProfile
@@ -88,7 +92,7 @@ func New(cfg Config) *Server {
 	if cfg.MaxConcurrentJobs <= 0 {
 		cfg.MaxConcurrentJobs = 4
 	}
-	s := &Server{router: chi.NewRouter(), logger: cfg.Logger, timeout: cfg.RequestTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, vfsCacheRoot: cfg.VFSCacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots), configPath: cfg.ConfigPath, libraries: normalizeLibraries(cfg.Libraries), profiles: normalizeProfiles(cfg.Profiles), libraryVFS: map[string]*libraryVFS{}}
+	s := &Server{router: chi.NewRouter(), logger: cfg.Logger, timeout: cfg.RequestTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, vfsCacheRoot: cfg.VFSCacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots), httpAllowedHosts: cleanHTTPAllowedHosts(cfg.HTTPAllowedHosts), configPath: cfg.ConfigPath, libraries: normalizeLibraries(cfg.Libraries), profiles: normalizeProfiles(cfg.Profiles), libraryVFS: map[string]*libraryVFS{}}
 	s.routes(cfg.CORS)
 	return s
 }
@@ -341,8 +345,14 @@ func (s *Server) hardwareCapabilities(_ context.Context, w http.ResponseWriter, 
 	})
 }
 
+type MediaInputRequest struct {
+	InputPath    string            `json:"input_path,omitempty"`
+	InputURL     string            `json:"input_url,omitempty"`
+	InputHeaders map[string]string `json:"input_headers,omitempty"`
+}
+
 type probeRequest struct {
-	InputPath string `json:"input_path"`
+	MediaInputRequest
 }
 type progressiveRequest struct {
 	InputPath  string                      `json:"input_path"`
@@ -365,7 +375,7 @@ type abrHLSRequest struct {
 	Options        transcoder.ABRHLSOptions `json:"options"`
 }
 type devicePlanRequest struct {
-	InputPath    string                        `json:"input_path"`
+	MediaInputRequest
 	OutputPath   string                        `json:"output_path"`
 	Capabilities transcoder.ClientCapabilities `json:"capabilities"`
 }
@@ -375,15 +385,15 @@ func (s *Server) probe(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.InputPath == "" {
-		writeError(w, http.StatusBadRequest, errors.New("input_path is required"))
+	resolved, err := s.resolveInput(ctx, req.InputPath, req.InputURL, req.InputHeaders)
+	if err != nil {
+		writeError(w, inputErrorStatus(err), err)
 		return
 	}
-	if err := s.validateInputPath(req.InputPath); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
+	if resolved.Cleanup != nil {
+		defer resolved.Cleanup()
 	}
-	info, err := transcoder.ProbeFile(ctx, req.InputPath)
+	info, err := transcoder.ProbeFile(ctx, resolved.Input)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -471,21 +481,29 @@ func (s *Server) devicePlan(ctx context.Context, w http.ResponseWriter, r *http.
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.InputPath == "" || req.OutputPath == "" {
-		writeError(w, http.StatusBadRequest, errors.New("input_path and output_path are required"))
+	if req.OutputPath == "" {
+		writeError(w, http.StatusBadRequest, errors.New("output_path is required"))
 		return
 	}
-	if err := s.validateInputPath(req.InputPath); err != nil {
-		writeError(w, http.StatusForbidden, err)
+	resolved, err := s.resolveInput(ctx, req.InputPath, req.InputURL, req.InputHeaders)
+	if err != nil {
+		writeError(w, inputErrorStatus(err), err)
 		return
 	}
-	info, err := transcoder.ProbeFile(ctx, req.InputPath)
+	if resolved.Cleanup != nil {
+		defer resolved.Cleanup()
+	}
+	info, err := transcoder.ProbeFile(ctx, resolved.Input)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	profile := transcoder.BuildDeviceProfile(info, req.Capabilities, req.OutputPath)
-	profile.InputPath = req.InputPath
+	if req.InputURL != "" {
+		profile.InputPath = req.InputURL
+	} else {
+		profile.InputPath = req.InputPath
+	}
 	plan, err := transcoder.BuildPlan(profile)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -790,7 +808,7 @@ func (r *rateLimiter) Allow(key string) bool {
 func normalizeLibraries(in map[string]LibraryConfig) map[string]LibraryConfig {
 	out := map[string]LibraryConfig{}
 	for id, lib := range in {
-		if id == "" || (lib.VFS == "" && lib.EncodedConfig == "") {
+		if id == "" || (lib.VFS == "" && lib.EncodedConfig == "" && lib.HTTP == nil) {
 			continue
 		}
 		lib.ID = id

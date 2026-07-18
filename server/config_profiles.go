@@ -29,24 +29,31 @@ type FileConfig struct {
 }
 
 type FileServerConfig struct {
-	Addr            string   `yaml:"addr" json:"addr"`
-	CacheRoot       string   `yaml:"cache_root" json:"cache_root"`
-	VFSCacheRoot    string   `yaml:"vfs_cache_root" json:"vfs_cache_root"`
-	Debug           bool     `yaml:"debug" json:"debug"`
-	RequestTimeout  string   `yaml:"request_timeout" json:"request_timeout"`
-	MaxJobs         int      `yaml:"max_jobs" json:"max_jobs"`
-	RateLimit       int      `yaml:"rate_limit" json:"rate_limit"`
-	APIKeys         []string `yaml:"api_keys" json:"api_keys"`
-	AllowInputRoots []string `yaml:"allow_input_roots" json:"allow_input_roots"`
-	CORSOrigins     []string `yaml:"cors_origins" json:"cors_origins"`
-	CORSCredentials bool     `yaml:"cors_credentials" json:"cors_credentials"`
+	Addr             string   `yaml:"addr" json:"addr"`
+	CacheRoot        string   `yaml:"cache_root" json:"cache_root"`
+	VFSCacheRoot     string   `yaml:"vfs_cache_root" json:"vfs_cache_root"`
+	Debug            bool     `yaml:"debug" json:"debug"`
+	RequestTimeout   string   `yaml:"request_timeout" json:"request_timeout"`
+	MaxJobs          int      `yaml:"max_jobs" json:"max_jobs"`
+	RateLimit        int      `yaml:"rate_limit" json:"rate_limit"`
+	APIKeys          []string `yaml:"api_keys" json:"api_keys"`
+	AllowInputRoots  []string `yaml:"allow_input_roots" json:"allow_input_roots"`
+	HTTPAllowedHosts []string `yaml:"http_allowed_hosts" json:"http_allowed_hosts"`
+	CORSOrigins      []string `yaml:"cors_origins" json:"cors_origins"`
+	CORSCredentials  bool     `yaml:"cors_credentials" json:"cors_credentials"`
 }
 
 type LibraryConfig struct {
-	ID            string            `yaml:"-" json:"id"`
-	VFS           string            `yaml:"vfs,omitempty" json:"-"`
-	EncodedConfig string            `yaml:"encoded_config,omitempty" json:"-"`
-	Options       map[string]string `yaml:"options,omitempty" json:"-"`
+	ID            string             `yaml:"-" json:"id"`
+	VFS           string             `yaml:"vfs,omitempty" json:"-"`
+	EncodedConfig string             `yaml:"encoded_config,omitempty" json:"-"`
+	Options       map[string]string  `yaml:"options,omitempty" json:"-"`
+	HTTP          *HTTPLibraryConfig `yaml:"http,omitempty" json:"-"`
+}
+
+type HTTPLibraryConfig struct {
+	BaseURL string            `yaml:"base_url" json:"-"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"-"`
 }
 
 type PlaybackProfile struct {
@@ -91,6 +98,7 @@ func LoadConfigFile(path string) (Config, error) {
 	cfg.RateLimitPerMinute = fc.Server.RateLimit
 	cfg.MaxConcurrentJobs = fc.Server.MaxJobs
 	cfg.AllowedInputRoots = fc.Server.AllowInputRoots
+	cfg.HTTPAllowedHosts = fc.Server.HTTPAllowedHosts
 	if fc.Server.RequestTimeout != "" {
 		d, err := time.ParseDuration(fc.Server.RequestTimeout)
 		if err != nil {
@@ -122,7 +130,7 @@ func LoadPlaybackConfig(path string) (*FileConfig, error) {
 	}
 	for id, lib := range cfg.Libraries {
 		lib.ID = id
-		if _, err := decodeLibraryVFSConfig(lib); err != nil {
+		if err := validateLibraryConfig(lib); err != nil {
 			return nil, fmt.Errorf("library %s: %w", id, err)
 		}
 		cfg.Libraries[id] = lib
@@ -448,9 +456,9 @@ func profileHash(p PlaybackProfile) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func librarySessionID(prefix, profileID, libraryID, rel string, st os.FileInfo, p PlaybackProfile) string {
+func librarySessionID(prefix, profileID, libraryID, rel string, resolved resolvedLibraryInput, p PlaybackProfile) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%s", prefix, profileID, libraryID, rel, st.Size(), st.ModTime().UnixNano(), profileHash(p))
+	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%s|%s", prefix, profileID, libraryID, rel, resolved.Size, resolved.ModTime.UnixNano(), resolved.Fingerprint, profileHash(p))
 	return hex.EncodeToString(h.Sum(nil))[:24]
 }
 
@@ -459,11 +467,11 @@ func (s *Server) ensureLibraryHLSSession(ctx context.Context, profileID, library
 	if !ok {
 		return nil, errors.New("profile not found")
 	}
-	resolved, err := s.resolveLibraryVFSInput(ctx, libraryID, rel)
+	resolved, err := s.resolveLibraryInput(ctx, libraryID, rel)
 	if err != nil {
 		return nil, err
 	}
-	id := librarySessionID("hls", profileID, libraryID, rel, resolved.Info, p)
+	id := librarySessionID("hls", profileID, libraryID, rel, resolved, p)
 	if sess, ok := s.dynHLS.Get(id); ok {
 		resolved.Cleanup()
 		return sess, nil
@@ -510,11 +518,11 @@ func (s *Server) ensureLibraryDASHSession(ctx context.Context, profileID, librar
 	if !ok {
 		return nil, errors.New("profile not found")
 	}
-	resolved, err := s.resolveLibraryVFSInput(ctx, libraryID, rel)
+	resolved, err := s.resolveLibraryInput(ctx, libraryID, rel)
 	if err != nil {
 		return nil, err
 	}
-	id := librarySessionID("dash", profileID, libraryID, rel, resolved.Info, p)
+	id := librarySessionID("dash", profileID, libraryID, rel, resolved, p)
 	if sess, ok := s.dynDASH.Get(id); ok {
 		resolved.Cleanup()
 		return sess, nil

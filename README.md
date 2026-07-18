@@ -1,6 +1,6 @@
 # media-transcoder
 
-On-demand HLS and DASH transcoding with FFmpeg libraries, rclone VFS inputs, adaptive bitrate profiles, and segment caching.
+On-demand HLS and DASH transcoding with FFmpeg libraries, seekable HTTP and rclone VFS inputs, adaptive bitrate profiles, and segment caching.
 
 ## Requirements
 
@@ -33,6 +33,10 @@ server:
   vfs_cache_root: "/var/cache/media-transcoder/vfs"
   max_jobs: 4
   request_timeout: "30m"
+  # input_url is disabled unless its host is explicitly allowed.
+  http_allowed_hosts:
+    - "media-cache"
+    - "storage.example.com"
 
 libraries:
   movies:
@@ -87,9 +91,54 @@ vfs: "gdrive:Movies"
 
 # Connection string
 vfs: ":s3,provider=AWS,env_auth=true:media-bucket/movies"
+
+# Seekable HTTP range library
+http:
+  base_url: "http://media-cache/media/"
+  headers:
+    Authorization: "Bearer internal-token"
 ```
 
+A library must configure exactly one source: `vfs`/`encoded_config`, or `http`. For an HTTP library, the relative media path from the playback URL is appended to `base_url`.
+
 Bitrates accept values such as `128kbps`, `2.8Mbps`, and plain bits per second. Rclone size options accept values such as `64MiB` and `250GiB`.
+
+## HTTP range inputs
+
+`POST /v1/probe`, `POST /v1/playback/hls/sessions`, and `POST /v1/playback/dash/sessions` accept either the existing `input_path` or a generic HTTP source:
+
+```json
+{
+  "input_url": "http://media-cache/media/objects/6fd27c73",
+  "input_headers": {
+    "Authorization": "Bearer internal-token"
+  }
+}
+```
+
+The origin must support byte ranges and return `206 Partial Content` with a valid `Content-Range`. The transcoder keeps sequential HTTP responses open and opens a new range only when libav seeks, so the input is not materialized into an rclone VFS cache.
+
+Enable trusted source hosts in YAML with `server.http_allowed_hosts`, or repeat the CLI flag `--http-allowed-host`. Exact hosts, `host:port`, wildcard subdomains such as `*.example.com`, and `*` are supported. An empty allowlist disables `input_url`. Cross-host redirects are revalidated and do not retain authorization or cookie headers.
+
+For repeated playback, configure the HTTP origin as a library instead of manually creating sessions:
+
+```yaml
+libraries:
+  cached_movies:
+    http:
+      base_url: "http://media-cache/media/"
+      headers:
+        Authorization: "Bearer internal-token"
+```
+
+Then use the same profile URLs as any VFS library:
+
+```text
+/play/hls/{profile}/cached_movies/Action/Movie.mkv/master.m3u8
+/play/dash/{profile}/cached_movies/Action/Movie.mkv/manifest.mpd
+```
+
+The server creates and reuses the dynamic profile session automatically. Existing direct `input_url`, local-path, and rclone VFS inputs remain supported.
 
 ## Web UI
 
@@ -182,6 +231,9 @@ GET  /v1/capabilities/hardware
 GET  /v1/metrics
 GET  /v1/profiles
 GET  /v1/libraries
+POST /v1/probe
+POST /v1/playback/hls/sessions
+POST /v1/playback/dash/sessions
 POST /v1/admin/reload
 
 GET  /play/hls/{profile}/{library}/{path...}/master.m3u8

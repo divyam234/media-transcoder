@@ -14,6 +14,12 @@ server:
   # Dedicated rclone VFS cache. Keep this separate from generated segments.
   vfs_cache_root: "/var/cache/media-transcoder/vfs"
 
+  # Generic input_url sources are disabled unless their host is allowed here.
+  # Use an exact host, host:port, *.example.com, or * for trusted deployments.
+  http_allowed_hosts:
+    - "media-cache"
+    - "storage.example.com"
+
   # Optional API authentication.
   # api_keys:
   #   - "replace-with-a-long-random-key"
@@ -31,6 +37,13 @@ libraries:
       dir_cache_time: "5m"
       poll_interval: "1m"
 
+  # HTTP libraries use the same profile playback URLs as VFS libraries.
+  # The relative media path is appended to base_url and read with HTTP ranges.
+  cached_movies:
+    http:
+      base_url: "http://media-cache/media/"
+      headers:
+        X-Internal-Key: "replace-with-an-internal-key"
   # Named remote loaded from rclone.conf. Full VFS caching is useful for remote
   # media because FFmpeg performs random seeks while probing and transcoding.
   cloud_movies:

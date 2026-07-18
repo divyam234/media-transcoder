@@ -20,7 +20,9 @@ import (
 )
 
 type DynamicHLSSessionRequest struct {
-	InputPath       string                     `json:"input_path"`
+	InputPath       string                     `json:"input_path,omitempty"`
+	InputURL        string                     `json:"input_url,omitempty"`
+	InputHeaders    map[string]string          `json:"input_headers,omitempty"`
 	Options         transcoder.HLSOptions      `json:"options"`
 	Variants        []transcoder.LadderVariant `json:"variants,omitempty"`
 	CacheDir        string                     `json:"cache_dir,omitempty"`
@@ -180,21 +182,24 @@ func (s *Server) createDynamicHLSSession(ctx context.Context, w http.ResponseWri
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.InputPath == "" {
-		writeError(w, http.StatusBadRequest, errors.New("input_path is required"))
-		return
-	}
 	requestedAudioMode := req.Options.AudioMode
 	req.Options.ApplyDefaults("virtual.m3u8")
 	// Dynamic playback should not perform a full static HLS transcode. SegmentPattern is irrelevant here.
 	if req.Options.SegmentSeconds <= 0 {
 		req.Options.SegmentSeconds = 4
 	}
-	if err := s.validateInputPath(req.InputPath); err != nil {
-		writeError(w, http.StatusForbidden, err)
+	resolved, err := s.resolveInput(ctx, req.InputPath, req.InputURL, req.InputHeaders)
+	if err != nil {
+		writeError(w, inputErrorStatus(err), err)
 		return
 	}
-	info, err := transcoder.ProbeFile(ctx, req.InputPath)
+	keepInput := false
+	defer func() {
+		if !keepInput && resolved.Cleanup != nil {
+			resolved.Cleanup()
+		}
+	}()
+	info, err := transcoder.ProbeFile(ctx, resolved.Input)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -217,11 +222,12 @@ func (s *Server) createDynamicHLSSession(ctx context.Context, w http.ResponseWri
 		return
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
-	sess := &DynamicHLSSession{ID: id, InputPath: req.InputPath, Options: req.Options, CacheDir: cacheDir, PrewarmSegments: req.PrewarmSegments, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel}
+	sess := &DynamicHLSSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, SourceKey: resolved.SourceKey, Options: req.Options, CacheDir: cacheDir, PrewarmSegments: req.PrewarmSegments, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel}
 	sess.Variants = buildHLSVariants(req.Options, req.Variants, info)
 	s.dynHLS.Add(sess)
+	keepInput = true
 	s.metrics.hlsSessions.Add(1)
-	s.logger.Info("hls session created", "id", id, "input", req.InputPath, "duration", info.Duration, "segments", int(math.Ceil(info.Duration/req.Options.SegmentSeconds)), "segment_seconds", req.Options.SegmentSeconds, "audio_mode", req.Options.AudioMode, "prewarm_segments", req.PrewarmSegments)
+	s.logger.Info("hls session created", "id", id, "input", resolved.Display, "duration", info.Duration, "segments", int(math.Ceil(info.Duration/req.Options.SegmentSeconds)), "segment_seconds", req.Options.SegmentSeconds, "audio_mode", req.Options.AudioMode, "prewarm_segments", req.PrewarmSegments)
 	writeJSON(w, http.StatusCreated, s.dynamicHLSResponse(r, sess))
 }
 
@@ -334,6 +340,11 @@ func (s *Server) deleteDynamicHLSSession(_ context.Context, w http.ResponseWrite
 	}
 	if sess.cancel != nil {
 		sess.cancel()
+	}
+	if sess.InputCleanup != nil {
+		s.sessionMu.Lock()
+		s.retiredInputs = append(s.retiredInputs, sess.InputCleanup)
+		s.sessionMu.Unlock()
 	}
 	_ = os.RemoveAll(sess.CacheDir)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "deleted"})
