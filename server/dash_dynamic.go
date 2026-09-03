@@ -482,6 +482,16 @@ func buildDASHVariants(base transcoder.DASHOptions, requested []transcoder.Ladde
 		if rv.Height > 0 {
 			opts.Height = rv.Height
 		}
+		crop := transcoder.CropRect{}
+		if rv.CropAspect != "" {
+			if resolved, err := transcoder.CenteredCropForAspect(info, rv.CropAspect); err == nil {
+				crop = resolved
+				opts.CropWidth = crop.Width
+				opts.CropHeight = crop.Height
+				opts.CropX = crop.X
+				opts.CropY = crop.Y
+			}
+		}
 		if rv.FPS > 0 {
 			opts.FPS = rv.FPS
 		}
@@ -499,8 +509,10 @@ func buildDASHVariants(base transcoder.DASHOptions, requested []transcoder.Ladde
 			width = info.Width
 		}
 		height := opts.Height
-		if height <= 0 {
-			height = scaledHeight(width, info)
+		if crop.Width > 0 && crop.Height > 0 {
+			height = transcoder.ScaledHeightForCrop(width, crop, info)
+		} else if height <= 0 {
+			height = transcoder.ScaledHeightForCrop(width, crop, info)
 		}
 		bw := rv.VideoBitrate + rv.AudioBitrate
 		if bw <= 0 {

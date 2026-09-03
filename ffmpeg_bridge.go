@@ -123,6 +123,10 @@ func transcodeVideo(ctx context.Context, input, output string, opts TranscodeOpt
 	defer C.free(unsafe.Pointer(caudioCodec))
 	copts := C.TCTranscodeOptions{
 		target_width:     C.int(opts.Width),
+		crop_width:       C.int(opts.CropWidth),
+		crop_height:      C.int(opts.CropHeight),
+		crop_x:           C.int(opts.CropX),
+		crop_y:           C.int(opts.CropY),
 		target_fps:       C.double(opts.FPS),
 		crf:              C.int(opts.CRF),
 		gop_size:         C.int(opts.GOPSize),
@@ -173,6 +177,10 @@ func transcodeHLSVideo(ctx context.Context, input, playlist, segmentPattern stri
 	defer C.free(unsafe.Pointer(caudioCodec))
 	copts := C.TCTranscodeOptions{
 		target_width:      C.int(opts.Width),
+		crop_width:        C.int(opts.CropWidth),
+		crop_height:       C.int(opts.CropHeight),
+		crop_x:            C.int(opts.CropX),
+		crop_y:            C.int(opts.CropY),
 		target_fps:        C.double(opts.FPS),
 		crf:               C.int(opts.CRF),
 		gop_size:          C.int(opts.GOPSize),
@@ -227,6 +235,10 @@ func transcodeDASHVideo(ctx context.Context, input, mpd string, opts DASHOptions
 	defer C.free(unsafe.Pointer(caudioCodec))
 	copts := C.TCTranscodeOptions{
 		target_width:    C.int(opts.Width),
+		crop_width:      C.int(opts.CropWidth),
+		crop_height:     C.int(opts.CropHeight),
+		crop_x:          C.int(opts.CropX),
+		crop_y:          C.int(opts.CropY),
 		target_fps:      C.double(opts.FPS),
 		crf:             C.int(opts.CRF),
 		gop_size:        C.int(opts.GOPSize),
@@ -266,6 +278,10 @@ func transcodeSegmentVideo(ctx context.Context, input, output string, opts Trans
 	defer C.free(unsafe.Pointer(caudioCodec))
 	copts := C.TCTranscodeOptions{
 		target_width:     C.int(opts.Width),
+		crop_width:       C.int(opts.CropWidth),
+		crop_height:      C.int(opts.CropHeight),
+		crop_x:           C.int(opts.CropX),
+		crop_y:           C.int(opts.CropY),
 		target_fps:       C.double(opts.FPS),
 		crf:              C.int(opts.CRF),
 		gop_size:         C.int(opts.GOPSize),
@@ -309,6 +325,10 @@ func transcodeFMP4SegmentVideo(ctx context.Context, input, output string, opts T
 	defer C.free(unsafe.Pointer(caudioCodec))
 	copts := C.TCTranscodeOptions{
 		target_width:     C.int(opts.Width),
+		crop_width:       C.int(opts.CropWidth),
+		crop_height:      C.int(opts.CropHeight),
+		crop_x:           C.int(opts.CropX),
+		crop_y:           C.int(opts.CropY),
 		target_fps:       C.double(opts.FPS),
 		crf:              C.int(opts.CRF),
 		gop_size:         C.int(opts.GOPSize),

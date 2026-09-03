@@ -12,6 +12,10 @@ typedef struct TCInfo {
 
 typedef struct TCTranscodeOptions {
     int target_width;
+    int crop_width;
+    int crop_height;
+    int crop_x;
+    int crop_y;
     double target_fps;
     int crf;
     int gop_size;

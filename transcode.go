@@ -16,6 +16,10 @@ type TranscodeOptions struct {
 	HardwareDecode bool    `json:"hardware_decode,omitempty"`
 	Width          int     `json:"width,omitempty"`
 	Height         int     `json:"height,omitempty"`
+	CropWidth      int     `json:"crop_width,omitempty"`
+	CropHeight     int     `json:"crop_height,omitempty"`
+	CropX          int     `json:"crop_x,omitempty"`
+	CropY          int     `json:"crop_y,omitempty"`
 	FPS            float64 `json:"fps,omitempty"`
 	CRF            int     `json:"crf,omitempty"`
 	Preset         string  `json:"preset,omitempty"`

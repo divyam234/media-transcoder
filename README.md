@@ -80,6 +80,8 @@ profiles:
 
 `cache_root` stores generated HLS/DASH output. `vfs_cache_root` stores rclone VFS cache data.
 
+Variants may also set `crop_aspect` (for example `"40:17"`). The server probes the source and computes a centered crop before scaling each rendition, so a 3840x2160 source becomes 3840x1632 with y=264 and a 1920x1080 source becomes 1920x816 with y=132. The resolved crop is applied in the direct libav filter graph; on the VAAPI hardware-decode path it stays in the same hardware-frame pipeline before `scale_vaapi`.
+
 Libraries support:
 
 ```yaml

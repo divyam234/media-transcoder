@@ -511,6 +511,10 @@ static int drain_filter_to_encoder(
 static int init_video_filter(
     TCDecoder *dec,
     int target_width,
+    int crop_width,
+    int crop_height,
+    int crop_x,
+    int crop_y,
     AVRational fps,
     enum AVPixelFormat output_pix_fmt,
     int use_vaapi,
@@ -570,11 +574,20 @@ static int init_video_filter(
 
     const char *pix_fmt_name = av_get_pix_fmt_name(output_pix_fmt);
     if (!pix_fmt_name) { set_error("unsupported filter output pixel format"); ret = AVERROR(EINVAL); goto fail; }
+    int use_crop = crop_width > 0 && crop_height > 0;
     if (use_vaapi) {
-        if (target_width > 0) snprintf(filter_descr, sizeof(filter_descr), "fps=%d/%d,scale_vaapi=w=%d:h=-2:format=%s", fps.num, fps.den, target_width, pix_fmt_name);
+        if (use_crop && target_width > 0) {
+            int target_height = ((int)llround((double)target_width * (double)crop_height / (double)crop_width)) & ~1;
+            if (target_height < 2) target_height = 2;
+            snprintf(filter_descr, sizeof(filter_descr), "crop=%d:%d:%d:%d,fps=%d/%d,scale_vaapi=w=%d:h=%d:format=%s", crop_width, crop_height, crop_x, crop_y, fps.num, fps.den, target_width, target_height, pix_fmt_name);
+        } else if (use_crop) {
+            snprintf(filter_descr, sizeof(filter_descr), "crop=%d:%d:%d:%d,fps=%d/%d,scale_vaapi=w=%d:h=%d:format=%s", crop_width, crop_height, crop_x, crop_y, fps.num, fps.den, crop_width, crop_height, pix_fmt_name);
+        } else if (target_width > 0) snprintf(filter_descr, sizeof(filter_descr), "fps=%d/%d,scale_vaapi=w=%d:h=-2:format=%s", fps.num, fps.den, target_width, pix_fmt_name);
         else snprintf(filter_descr, sizeof(filter_descr), "fps=%d/%d,scale_vaapi=format=%s", fps.num, fps.den, pix_fmt_name);
     } else {
-        if (target_width > 0) snprintf(filter_descr, sizeof(filter_descr), "scale=%d:-2:flags=fast_bilinear,fps=%d/%d,format=%s", target_width, fps.num, fps.den, pix_fmt_name);
+        if (use_crop && target_width > 0) snprintf(filter_descr, sizeof(filter_descr), "crop=%d:%d:%d:%d,scale=%d:-2:flags=fast_bilinear,fps=%d/%d,format=%s", crop_width, crop_height, crop_x, crop_y, target_width, fps.num, fps.den, pix_fmt_name);
+        else if (use_crop) snprintf(filter_descr, sizeof(filter_descr), "crop=%d:%d:%d:%d,fps=%d/%d,format=%s", crop_width, crop_height, crop_x, crop_y, fps.num, fps.den, pix_fmt_name);
+        else if (target_width > 0) snprintf(filter_descr, sizeof(filter_descr), "scale=%d:-2:flags=fast_bilinear,fps=%d/%d,format=%s", target_width, fps.num, fps.den, pix_fmt_name);
         else snprintf(filter_descr, sizeof(filter_descr), "fps=%d/%d,format=%s", fps.num, fps.den, pix_fmt_name);
     }
 
@@ -808,7 +821,7 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     enum AVPixelFormat filter_pix_fmt = use_vaapi ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
     AVBufferRef *filter_device_ctx = zero_copy_vaapi ? dec->hw_device_ctx : NULL;
     AVBufferRef *filter_frames_ctx = zero_copy_vaapi ? dec->hw_frames_ctx : NULL;
-    int ret = init_video_filter(dec, target_width, fps, filter_pix_fmt, zero_copy_vaapi, filter_device_ctx, filter_frames_ctx, &filter_graph, &src_ctx, &sink_ctx, &out_w, &out_h, &sink_tb);
+    int ret = init_video_filter(dec, target_width, opts ? opts->crop_width : 0, opts ? opts->crop_height : 0, opts ? opts->crop_x : 0, opts ? opts->crop_y : 0, fps, filter_pix_fmt, zero_copy_vaapi, filter_device_ctx, filter_frames_ctx, &filter_graph, &src_ctx, &sink_ctx, &out_w, &out_h, &sink_tb);
     if (ret < 0) { decoder_close(dec); return ret; }
     if (out_w <= 0 || out_h <= 0) { set_error("invalid filter output size %dx%d", out_w, out_h); avfilter_graph_free(&filter_graph); decoder_close(dec); return AVERROR(EINVAL); }
     if (out_w % 2) out_w++;

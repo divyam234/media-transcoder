@@ -138,6 +138,11 @@ func LoadPlaybackConfig(path string) (*FileConfig, error) {
 	for id, p := range cfg.Profiles {
 		p.ID = id
 		applyProfileDefaults(&p)
+		for i, variant := range p.Variants {
+			if _, err := transcoder.ParseCropAspect(variant.CropAspect); err != nil {
+				return nil, fmt.Errorf("profile %s variant %d: %w", id, i, err)
+			}
+		}
 		cfg.Profiles[id] = p
 	}
 	return &cfg, nil

@@ -95,6 +95,7 @@ profiles:
       crf: 23
       gop_size: 96
       max_b_frames: 0
+    # Optional per-variant centered source crop, e.g. crop_aspect: "40:17".
     variants:
       - name: 360p
         width: 640

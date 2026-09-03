@@ -3,9 +3,12 @@ package transcoder
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 type DASHOptions struct {
@@ -61,10 +64,75 @@ type LadderVariant struct {
 	Name         string  `json:"name" yaml:"name"`
 	Width        int     `json:"width" yaml:"width"`
 	Height       int     `json:"height,omitempty" yaml:"height,omitempty"`
+	CropAspect   string  `json:"crop_aspect,omitempty" yaml:"crop_aspect,omitempty"`
 	VideoBitrate Bitrate `json:"video_bitrate,omitempty" yaml:"video_bitrate,omitempty"`
 	AudioBitrate Bitrate `json:"audio_bitrate,omitempty" yaml:"audio_bitrate,omitempty"`
 	FPS          float64 `json:"fps,omitempty" yaml:"fps,omitempty"`
 	CRF          int     `json:"crf,omitempty" yaml:"crf,omitempty"`
+}
+
+type CropRect struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	X      int `json:"x"`
+	Y      int `json:"y"`
+}
+
+func ParseCropAspect(aspect string) (float64, error) {
+	aspect = strings.TrimSpace(aspect)
+	if aspect == "" {
+		return 0, nil
+	}
+	left, right, ok := strings.Cut(aspect, ":")
+	if !ok {
+		return 0, fmt.Errorf("crop aspect %q must use width:height form", aspect)
+	}
+	aw, err := strconv.ParseFloat(strings.TrimSpace(left), 64)
+	if err != nil || aw <= 0 {
+		return 0, fmt.Errorf("invalid crop aspect width %q", left)
+	}
+	ah, err := strconv.ParseFloat(strings.TrimSpace(right), 64)
+	if err != nil || ah <= 0 {
+		return 0, fmt.Errorf("invalid crop aspect height %q", right)
+	}
+	return aw / ah, nil
+}
+
+func CenteredCropForAspect(info MediaInfo, aspect string) (CropRect, error) {
+	target, err := ParseCropAspect(aspect)
+	if err != nil {
+		return CropRect{}, err
+	}
+	if target == 0 {
+		return CropRect{}, nil
+	}
+	if info.Width <= 0 || info.Height <= 0 {
+		return CropRect{}, fmt.Errorf("invalid source size %dx%d", info.Width, info.Height)
+	}
+
+	source := float64(info.Width) / float64(info.Height)
+	cropW, cropH := info.Width, info.Height
+	if source > target {
+		cropW = int(math.Floor(float64(info.Height)*target)) &^ 1
+	} else if source < target {
+		cropH = int(math.Floor(float64(info.Width)/target)) &^ 1
+	}
+	if cropW <= 0 || cropH <= 0 {
+		return CropRect{}, fmt.Errorf("crop aspect %q produced invalid size", aspect)
+	}
+	x := ((info.Width - cropW) / 2) &^ 1
+	y := ((info.Height - cropH) / 2) &^ 1
+	return CropRect{Width: cropW, Height: cropH, X: x, Y: y}, nil
+}
+
+func ScaledHeightForCrop(width int, crop CropRect, info MediaInfo) int {
+	if crop.Width > 0 && crop.Height > 0 {
+		return int(math.Round(float64(width) * float64(crop.Height) / float64(crop.Width)))
+	}
+	if info.Width <= 0 || info.Height <= 0 {
+		return 0
+	}
+	return int(math.Round(float64(width) * float64(info.Height) / float64(info.Width)))
 }
 
 type ABRHLSOptions struct {
@@ -110,6 +178,16 @@ func TranscodeABRHLSFromFile(ctx context.Context, inputPath, masterPlaylist stri
 		playlist := filepath.Join(filepath.Dir(masterPlaylist), name, "index.m3u8")
 		hls := opts.Base
 		hls.Width = variant.Width
+		if variant.CropAspect != "" {
+			crop, err := CenteredCropForAspect(info, variant.CropAspect)
+			if err != nil {
+				return nil, fmt.Errorf("variant %s: %w", name, err)
+			}
+			hls.CropWidth = crop.Width
+			hls.CropHeight = crop.Height
+			hls.CropX = crop.X
+			hls.CropY = crop.Y
+		}
 		if variant.FPS > 0 {
 			hls.FPS = variant.FPS
 		}

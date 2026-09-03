@@ -176,3 +176,24 @@ func TestExampleConfigLoads(t *testing.T) {
 		t.Fatalf("human-readable example bitrate parsed as %d", got)
 	}
 }
+
+func TestVariantCropAspectResolvesFromSource(t *testing.T) {
+	info := transcoder.MediaInfo{Width: 3840, Height: 2160}
+	requested := []transcoder.LadderVariant{{Name: "1080p", Width: 1920, CropAspect: "40:17"}}
+
+	hls := buildHLSVariants(transcoder.HLSOptions{}, requested, info)
+	if len(hls) != 1 {
+		t.Fatalf("HLS variants = %d", len(hls))
+	}
+	if got := hls[0]; got.Height != 816 || got.Options.CropWidth != 3840 || got.Options.CropHeight != 1632 || got.Options.CropX != 0 || got.Options.CropY != 264 {
+		t.Fatalf("unexpected HLS crop variant: %+v options=%+v", got, got.Options)
+	}
+
+	dash := buildDASHVariants(transcoder.DASHOptions{}, requested, info)
+	if len(dash) != 1 {
+		t.Fatalf("DASH variants = %d", len(dash))
+	}
+	if got := dash[0]; got.Height != 816 || got.Options.CropWidth != 3840 || got.Options.CropHeight != 1632 || got.Options.CropX != 0 || got.Options.CropY != 264 {
+		t.Fatalf("unexpected DASH crop variant: %+v options=%+v", got, got.Options)
+	}
+}

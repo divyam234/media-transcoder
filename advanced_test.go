@@ -98,3 +98,31 @@ func TestOptionalAudioCopyFromInputWithAudio(t *testing.T) {
 		t.Fatalf("expected output audio stream, got %+v", outInfo)
 	}
 }
+
+func TestCenteredCropForAspect(t *testing.T) {
+	tests := []struct {
+		name string
+		info MediaInfo
+		want CropRect
+	}{
+		{name: "2160p", info: MediaInfo{Width: 3840, Height: 2160}, want: CropRect{Width: 3840, Height: 1632, X: 0, Y: 264}},
+		{name: "1080p", info: MediaInfo{Width: 1920, Height: 1080}, want: CropRect{Width: 1920, Height: 816, X: 0, Y: 132}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := CenteredCropForAspect(tt.info, "40:17")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("crop = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseCropAspectRejectsInvalidValue(t *testing.T) {
+	if _, err := ParseCropAspect("2.35"); err == nil {
+		t.Fatal("expected invalid crop aspect to fail")
+	}
+}

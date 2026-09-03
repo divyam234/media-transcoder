@@ -478,6 +478,16 @@ func buildHLSVariants(base transcoder.HLSOptions, requested []transcoder.LadderV
 		if rv.Width > 0 {
 			opts.Width = rv.Width
 		}
+		crop := transcoder.CropRect{}
+		if rv.CropAspect != "" {
+			if resolved, err := transcoder.CenteredCropForAspect(info, rv.CropAspect); err == nil {
+				crop = resolved
+				opts.CropWidth = crop.Width
+				opts.CropHeight = crop.Height
+				opts.CropX = crop.X
+				opts.CropY = crop.Y
+			}
+		}
 		if rv.FPS > 0 {
 			opts.FPS = rv.FPS
 		}
@@ -495,8 +505,10 @@ func buildHLSVariants(base transcoder.HLSOptions, requested []transcoder.LadderV
 			width = info.Width
 		}
 		height := rv.Height
-		if height <= 0 {
-			height = scaledHeight(width, info)
+		if crop.Width > 0 && crop.Height > 0 {
+			height = transcoder.ScaledHeightForCrop(width, crop, info)
+		} else if height <= 0 {
+			height = transcoder.ScaledHeightForCrop(width, crop, info)
 		}
 		bw := rv.VideoBitrate + rv.AudioBitrate
 		if bw <= 0 {

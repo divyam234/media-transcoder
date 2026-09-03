@@ -62,3 +62,52 @@ func TestVAAPIRealInput(t *testing.T) {
 		t.Fatal("VAAPI output is empty")
 	}
 }
+
+func TestVAAPICropAspectPipeline(t *testing.T) {
+	if os.Getenv("TRANSCODER_TEST_VAAPI_CROP") == "" {
+		t.Skip("set TRANSCODER_TEST_VAAPI_CROP=1 to run the VAAPI crop integration test")
+	}
+	device := "/dev/dri/renderD128"
+	if _, err := os.Stat(device); err != nil {
+		t.Skipf("VAAPI device unavailable: %v", err)
+	}
+	if !EncoderAvailable("h264_vaapi") {
+		t.Skip("h264_vaapi is unavailable in this FFmpeg build")
+	}
+	input := "testdata/sample.mp4"
+	info, err := ProbeFile(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crop, err := CenteredCropForAspect(info, "40:17")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "vaapi-crop.ts")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = TranscodeSegmentFromFile(ctx, input, output, TranscodeOptions{
+		EncoderName:    "h264_vaapi",
+		HardwareDevice: device,
+		HardwareDecode: true,
+		Width:          160,
+		CropWidth:      crop.Width,
+		CropHeight:     crop.Height,
+		CropX:          crop.X,
+		CropY:          crop.Y,
+		CRF:            28,
+		GOPSize:        48,
+		AudioMode:      AudioSkip,
+		Duration:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outInfo, err := ProbeFile(context.Background(), output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outInfo.Width != 160 || outInfo.Height != 68 {
+		t.Fatalf("cropped VAAPI output = %dx%d, want 160x68", outInfo.Width, outInfo.Height)
+	}
+}
