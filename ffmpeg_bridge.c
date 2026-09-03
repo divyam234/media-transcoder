@@ -432,15 +432,6 @@ static enum AVPixelFormat hardware_get_format(AVCodecContext *ctx, const enum AV
     return AV_PIX_FMT_NONE;
 }
 
-static enum AVPixelFormat hardware_sw_format(enum AVPixelFormat input) {
-    switch (input) {
-        case AV_PIX_FMT_YUV420P10LE:
-        case AV_PIX_FMT_P010LE:
-            return AV_PIX_FMT_P010LE;
-        default:
-            return AV_PIX_FMT_NV12;
-    }
-}
 
 static int decoder_supports_hw(const AVCodec *codec, enum AVHWDeviceType device_type, enum AVPixelFormat pix_fmt) {
     for (int i = 0;; i++) {
@@ -504,14 +495,12 @@ static TCDecoder *decoder_open(const char *input_path, const char *encoder_name,
         const char *device = hardware_device && hardware_device[0] ? hardware_device : (device_type == AV_HWDEVICE_TYPE_CUDA ? "0" : "/dev/dri/renderD128");
         d->hw_device_ctx = tc_hw_device_ref(device_type, device);
         if (!d->hw_device_ctx) { decoder_close(d); return NULL; }
-        d->hw_frames_ctx = av_hwframe_ctx_alloc(d->hw_device_ctx);
-        if (!d->hw_frames_ctx) { set_error("av_hwframe_ctx_alloc hardware decode failed"); decoder_close(d); return NULL; }
-        AVHWFramesContext *frames = (AVHWFramesContext *)d->hw_frames_ctx->data;
-        frames->format = hw_pix_fmt;
-        frames->sw_format = hardware_sw_format((enum AVPixelFormat)d->stream->codecpar->format);
-        frames->width = d->dec->width;
-        frames->height = d->dec->height;
-        frames->initial_pool_size = 20;
+        ret = avcodec_get_hw_frames_parameters(d->dec, d->hw_device_ctx, hw_pix_fmt, &d->hw_frames_ctx);
+        if (ret < 0 || !d->hw_frames_ctx) {
+            set_av_error("avcodec_get_hw_frames_parameters hardware decode", ret);
+            decoder_close(d);
+            return NULL;
+        }
         ret = av_hwframe_ctx_init(d->hw_frames_ctx);
         if (ret < 0) { set_av_error("av_hwframe_ctx_init hardware decode", ret); decoder_close(d); return NULL; }
         d->dec->opaque = d;
