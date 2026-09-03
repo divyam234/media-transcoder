@@ -5,6 +5,8 @@ server:
   addr: ":8080"
   debug: false
   request_timeout: "30m"
+  # Release reusable VAAPI/NVDEC decoder state after playback has been idle.
+  hardware_decoder_idle_timeout: "30s"
   max_jobs: 4
   rate_limit: 0
 

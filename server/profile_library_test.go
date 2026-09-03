@@ -172,6 +172,13 @@ func TestExampleConfigLoads(t *testing.T) {
 	if len(cfg.Server.HTTPAllowedHosts) != 2 || cfg.Server.HTTPAllowedHosts[0] != "media-cache" {
 		t.Fatalf("HTTP allowed hosts were not loaded: %v", cfg.Server.HTTPAllowedHosts)
 	}
+	runtimeCfg, err := LoadConfigFile(filepath.Join("..", "transcoder.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtimeCfg.HardwareDecoderIdleTimeout != 30*time.Second {
+		t.Fatalf("hardware decoder idle timeout = %s", runtimeCfg.HardwareDecoderIdleTimeout)
+	}
 	if got := cfg.Profiles["hls-h264-nvenc"].Variants[3].VideoBitrate; got != 5500000 {
 		t.Fatalf("human-readable example bitrate parsed as %d", got)
 	}

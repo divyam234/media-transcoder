@@ -46,21 +46,77 @@ type DynamicDASHVariant struct {
 }
 
 type DynamicDASHSession struct {
-	ID              string
-	InputPath       string
-	Options         transcoder.DASHOptions
-	AudioOptions    transcoder.TranscodeOptions
-	AudioCodec      transcoder.CodecDescriptor
-	Variants        []DynamicDASHVariant
-	CacheDir        string
-	PrewarmSegments int
-	Info            transcoder.MediaInfo
-	CreatedAt       time.Time
-	SourceKey       string
-	InputCleanup    func()
-	codecMu         sync.Mutex
-	ctx             context.Context
-	cancel          context.CancelFunc
+	ID                 string
+	InputPath          string
+	Options            transcoder.DASHOptions
+	AudioOptions       transcoder.TranscodeOptions
+	AudioCodec         transcoder.CodecDescriptor
+	Variants           []DynamicDASHVariant
+	CacheDir           string
+	PrewarmSegments    int
+	Info               transcoder.MediaInfo
+	CreatedAt          time.Time
+	SourceKey          string
+	InputCleanup       func()
+	codecMu            sync.Mutex
+	prewarmMu          sync.Mutex
+	decoderMu          sync.Mutex
+	videoDecoder       *transcoder.FMP4VideoDecoder
+	decoderTimer       *time.Timer
+	decoderIdleTimeout time.Duration
+	ctx                context.Context
+	cancel             context.CancelFunc
+}
+
+func (sess *DynamicDASHSession) getVideoDecoder(opts transcoder.TranscodeOptions) (*transcoder.FMP4VideoDecoder, error) {
+	sess.decoderMu.Lock()
+	defer sess.decoderMu.Unlock()
+	if sess.decoderTimer != nil {
+		sess.decoderTimer.Stop()
+		sess.decoderTimer = nil
+	}
+	if sess.videoDecoder == nil {
+		dec, err := transcoder.NewFMP4VideoDecoder(sess.InputPath, opts)
+		if err != nil {
+			return nil, err
+		}
+		sess.videoDecoder = dec
+	}
+	return sess.videoDecoder, nil
+}
+
+func (sess *DynamicDASHSession) scheduleVideoDecoderClose() {
+	sess.decoderMu.Lock()
+	defer sess.decoderMu.Unlock()
+	if sess.decoderTimer != nil {
+		sess.decoderTimer.Stop()
+	}
+	timeout := sess.decoderIdleTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	sess.decoderTimer = time.AfterFunc(timeout, func() {
+		sess.decoderMu.Lock()
+		defer sess.decoderMu.Unlock()
+		if sess.videoDecoder != nil {
+			sess.videoDecoder.Close()
+			sess.videoDecoder = nil
+		}
+		sess.decoderTimer = nil
+	})
+}
+
+func (sess *DynamicDASHSession) closeVideoDecoder() {
+	sess.decoderMu.Lock()
+	defer sess.decoderMu.Unlock()
+	if sess.decoderTimer != nil {
+		sess.decoderTimer.Stop()
+		sess.decoderTimer = nil
+	}
+	if sess.videoDecoder != nil {
+		sess.videoDecoder.Close()
+		sess.videoDecoder = nil
+	}
 }
 
 type DynamicDASHManager struct {
@@ -211,7 +267,7 @@ func (s *Server) createDynamicDASHSession(ctx context.Context, w http.ResponseWr
 		return
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
-	sess := &DynamicDASHSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, SourceKey: resolved.SourceKey, Options: req.Options, AudioOptions: audioOpts, CacheDir: cacheDir, PrewarmSegments: req.PrewarmSegments, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel}
+	sess := &DynamicDASHSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, SourceKey: resolved.SourceKey, Options: req.Options, AudioOptions: audioOpts, CacheDir: cacheDir, PrewarmSegments: req.PrewarmSegments, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel, decoderIdleTimeout: s.hardwareDecoderIdleTimeout}
 	sess.Variants = buildDASHVariants(req.Options, req.Variants, info)
 	s.dynDASH.Add(sess)
 	keepInput = true
@@ -266,6 +322,7 @@ func (s *Server) deleteDynamicDASHSession(_ context.Context, w http.ResponseWrit
 	if sess.cancel != nil {
 		sess.cancel()
 	}
+	sess.closeVideoDecoder()
 	if sess.InputCleanup != nil {
 		s.sessionMu.Lock()
 		s.retiredInputs = append(s.retiredInputs, sess.InputCleanup)
@@ -591,12 +648,12 @@ func (s *Server) dynamicDASHVariantSegment(ctx context.Context, w http.ResponseW
 		return
 	}
 	path := dashSegmentPathFor(sess, variant, idx)
-	s.prewarmDASHVariant(sess, variant, idx+1, sess.PrewarmSegments)
 	if err := s.ensureDynamicDASHVariantSegment(ctx, sess, variant, idx, path); err != nil {
 		s.logger.Warn("dash segment failed", "id", id, "variant", variant.Name, "index", idx, "err", err)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.prewarmDASHVariant(sess, variant, idx+1, sess.PrewarmSegments)
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	http.ServeFile(w, r, path)
@@ -665,27 +722,33 @@ func (s *Server) prewarmDASHVariant(sess *DynamicDASHSession, variant DynamicDAS
 	if sess == nil || count <= 0 || sess.ctx == nil || sess.ctx.Err() != nil {
 		return
 	}
-	segDur := variant.Options.SegmentSeconds
-	if segDur <= 0 {
-		segDur = 4
+	if !sess.prewarmMu.TryLock() {
+		return
 	}
-	maxCount := int(math.Ceil(sess.Info.Duration / segDur))
-	for n := 0; n < count; n++ {
-		idx := startIdx + n
-		if idx < 0 || idx >= maxCount {
-			continue
+	if !s.dynDASH.beginBackground() {
+		sess.prewarmMu.Unlock()
+		return
+	}
+	go func() {
+		defer s.dynDASH.endBackground()
+		defer sess.prewarmMu.Unlock()
+
+		segDur := variant.Options.SegmentSeconds
+		if segDur <= 0 {
+			segDur = 4
 		}
-		path := dashSegmentPathFor(sess, variant, idx)
-		if !s.dynDASH.beginBackground() {
-			return
-		}
-		go func(i int, p string) {
-			defer s.dynDASH.endBackground()
-			if err := s.ensureDynamicDASHVariantSegment(sess.ctx, sess, variant, i, p); err != nil && sess.ctx.Err() == nil {
-				s.logger.Debug("dash prewarm failed", "id", sess.ID, "variant", variant.Name, "index", i, "err", err)
+		maxCount := int(math.Ceil(sess.Info.Duration / segDur))
+		for n := 0; n < count; n++ {
+			idx := startIdx + n
+			if idx < 0 || idx >= maxCount || sess.ctx.Err() != nil {
+				continue
 			}
-		}(idx, path)
-	}
+			path := dashSegmentPathFor(sess, variant, idx)
+			if err := s.ensureDynamicDASHVariantSegment(sess.ctx, sess, variant, idx, path); err != nil && sess.ctx.Err() == nil {
+				s.logger.Debug("dash prewarm failed", "id", sess.ID, "variant", variant.Name, "index", idx, "err", err)
+			}
+		}
+	}()
 }
 
 func (s *Server) ensureDynamicDASHSegment(ctx context.Context, sess *DynamicDASHSession, idx int, path string) error {
@@ -846,12 +909,26 @@ func (s *Server) ensureDynamicDASHVariantSegment(ctx context.Context, sess *Dyna
 	defer cancel()
 	started := time.Now()
 	s.logger.Info("dash segment generate start", "id", sess.ID, "variant", variant.Name, "index", idx, "start_time", opts.StartTime, "duration", opts.Duration, "audio_mode", opts.AudioMode, "output", path)
-	if _, err := transcoder.TranscodeFMP4SegmentFromFile(genCtx, sess.InputPath, fullTmp, opts); err != nil {
+	var transcodeErr error
+	if opts.HardwareDecode {
+		dec, err := sess.getVideoDecoder(opts)
+		if err != nil {
+			transcodeErr = err
+		} else {
+			transcodeErr = dec.Transcode(genCtx, fullTmp, opts)
+			if transcodeErr == nil {
+				sess.scheduleVideoDecoderClose()
+			}
+		}
+	} else {
+		_, transcodeErr = transcoder.TranscodeFMP4SegmentFromFile(genCtx, sess.InputPath, fullTmp, opts)
+	}
+	if transcodeErr != nil {
 		s.metrics.segmentErrors.Add(1)
 		s.metrics.dashVideoErrors.Add(1)
 		_ = os.Remove(fullTmp)
 		_ = os.Remove(tmp)
-		return err
+		return transcodeErr
 	}
 	if err := splitHLSFMP4(fullTmp, dashInitPathFor(sess, variant), tmp); err != nil {
 		s.metrics.segmentErrors.Add(1)

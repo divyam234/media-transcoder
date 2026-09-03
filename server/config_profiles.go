@@ -29,18 +29,19 @@ type FileConfig struct {
 }
 
 type FileServerConfig struct {
-	Addr             string   `yaml:"addr" json:"addr"`
-	CacheRoot        string   `yaml:"cache_root" json:"cache_root"`
-	VFSCacheRoot     string   `yaml:"vfs_cache_root" json:"vfs_cache_root"`
-	Debug            bool     `yaml:"debug" json:"debug"`
-	RequestTimeout   string   `yaml:"request_timeout" json:"request_timeout"`
-	MaxJobs          int      `yaml:"max_jobs" json:"max_jobs"`
-	RateLimit        int      `yaml:"rate_limit" json:"rate_limit"`
-	APIKeys          []string `yaml:"api_keys" json:"api_keys"`
-	AllowInputRoots  []string `yaml:"allow_input_roots" json:"allow_input_roots"`
-	HTTPAllowedHosts []string `yaml:"http_allowed_hosts" json:"http_allowed_hosts"`
-	CORSOrigins      []string `yaml:"cors_origins" json:"cors_origins"`
-	CORSCredentials  bool     `yaml:"cors_credentials" json:"cors_credentials"`
+	Addr                       string   `yaml:"addr" json:"addr"`
+	CacheRoot                  string   `yaml:"cache_root" json:"cache_root"`
+	VFSCacheRoot               string   `yaml:"vfs_cache_root" json:"vfs_cache_root"`
+	Debug                      bool     `yaml:"debug" json:"debug"`
+	RequestTimeout             string   `yaml:"request_timeout" json:"request_timeout"`
+	HardwareDecoderIdleTimeout string   `yaml:"hardware_decoder_idle_timeout" json:"hardware_decoder_idle_timeout"`
+	MaxJobs                    int      `yaml:"max_jobs" json:"max_jobs"`
+	RateLimit                  int      `yaml:"rate_limit" json:"rate_limit"`
+	APIKeys                    []string `yaml:"api_keys" json:"api_keys"`
+	AllowInputRoots            []string `yaml:"allow_input_roots" json:"allow_input_roots"`
+	HTTPAllowedHosts           []string `yaml:"http_allowed_hosts" json:"http_allowed_hosts"`
+	CORSOrigins                []string `yaml:"cors_origins" json:"cors_origins"`
+	CORSCredentials            bool     `yaml:"cors_credentials" json:"cors_credentials"`
 }
 
 type LibraryConfig struct {
@@ -105,6 +106,16 @@ func LoadConfigFile(path string) (Config, error) {
 			return Config{}, fmt.Errorf("server.request_timeout: %w", err)
 		}
 		cfg.RequestTimeout = d
+	}
+	if fc.Server.HardwareDecoderIdleTimeout != "" {
+		d, err := time.ParseDuration(fc.Server.HardwareDecoderIdleTimeout)
+		if err != nil {
+			return Config{}, fmt.Errorf("server.hardware_decoder_idle_timeout: %w", err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf("server.hardware_decoder_idle_timeout must be > 0")
+		}
+		cfg.HardwareDecoderIdleTimeout = d
 	}
 	if len(fc.Server.CORSOrigins) > 0 || fc.Server.CORSCredentials {
 		cfg.CORS.AllowedOrigins = fc.Server.CORSOrigins
@@ -504,7 +515,7 @@ func (s *Server) ensureLibraryHLSSession(ctx context.Context, profileID, library
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
 	sourceKey := "hls|" + profileID + "|" + libraryID + "|" + rel
-	sess := &DynamicHLSSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, Options: opts, Variants: buildHLSVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 2, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
+	sess := &DynamicHLSSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, Options: opts, Variants: buildHLSVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 2, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel, decoderIdleTimeout: s.hardwareDecoderIdleTimeout}
 	for _, stale := range s.dynHLS.ReplaceSourceSession(sess) {
 		if stale.cancel != nil {
 			stale.cancel()
@@ -562,11 +573,12 @@ func (s *Server) ensureLibraryDASHSession(ctx context.Context, profileID, librar
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
 	sourceKey := "dash|" + profileID + "|" + libraryID + "|" + rel
-	sess := &DynamicDASHSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, Options: opts, AudioOptions: audioOpts, Variants: buildDASHVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
+	sess := &DynamicDASHSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, Options: opts, AudioOptions: audioOpts, Variants: buildDASHVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel, decoderIdleTimeout: s.hardwareDecoderIdleTimeout}
 	for _, stale := range s.dynDASH.ReplaceSourceSession(sess) {
 		if stale.cancel != nil {
 			stale.cancel()
 		}
+		stale.closeVideoDecoder()
 		if stale.InputCleanup != nil {
 			s.retiredInputs = append(s.retiredInputs, stale.InputCleanup)
 		}

@@ -33,6 +33,7 @@ server:
   vfs_cache_root: "/var/cache/media-transcoder/vfs"
   max_jobs: 4
   request_timeout: "30m"
+  hardware_decoder_idle_timeout: "30s" # release idle VAAPI/NVDEC decoder state
   # input_url is disabled unless its host is explicitly allowed.
   http_allowed_hosts:
     - "media-cache"

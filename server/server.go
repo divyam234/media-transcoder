@@ -26,11 +26,12 @@ import (
 )
 
 type Config struct {
-	Logger             *slog.Logger
-	RequestTimeout     time.Duration
-	APIKeys            []string
-	RateLimitPerMinute int
-	MaxConcurrentJobs  int
+	Logger                     *slog.Logger
+	RequestTimeout             time.Duration
+	HardwareDecoderIdleTimeout time.Duration
+	APIKeys                    []string
+	RateLimitPerMinute         int
+	MaxConcurrentJobs          int
 	// CacheRoot forces all dynamic playback cache directories under a server-owned root.
 	// When set, client-provided cache_dir is ignored.
 	CacheRoot string
@@ -59,27 +60,28 @@ type CORSConfig struct {
 }
 
 type Server struct {
-	router            chi.Router
-	logger            *slog.Logger
-	timeout           time.Duration
-	keys              []string
-	rate              *rateLimiter
-	jobs              *JobManager
-	dynHLS            *DynamicHLSManager
-	dynDASH           *DynamicDASHManager
-	metrics           *Metrics
-	cacheRoot         string
-	vfsCacheRoot      string
-	allowedInputRoots []string
-	httpAllowedHosts  []string
-	configPath        string
-	libraries         map[string]LibraryConfig
-	profiles          map[string]PlaybackProfile
-	configMu          sync.RWMutex
-	sessionMu         sync.Mutex
-	retiredInputs     []func()
-	vfsMu             sync.Mutex
-	libraryVFS        map[string]*libraryVFS
+	router                     chi.Router
+	logger                     *slog.Logger
+	timeout                    time.Duration
+	hardwareDecoderIdleTimeout time.Duration
+	keys                       []string
+	rate                       *rateLimiter
+	jobs                       *JobManager
+	dynHLS                     *DynamicHLSManager
+	dynDASH                    *DynamicDASHManager
+	metrics                    *Metrics
+	cacheRoot                  string
+	vfsCacheRoot               string
+	allowedInputRoots          []string
+	httpAllowedHosts           []string
+	configPath                 string
+	libraries                  map[string]LibraryConfig
+	profiles                   map[string]PlaybackProfile
+	configMu                   sync.RWMutex
+	sessionMu                  sync.Mutex
+	retiredInputs              []func()
+	vfsMu                      sync.Mutex
+	libraryVFS                 map[string]*libraryVFS
 }
 
 func New(cfg Config) *Server {
@@ -92,7 +94,10 @@ func New(cfg Config) *Server {
 	if cfg.MaxConcurrentJobs <= 0 {
 		cfg.MaxConcurrentJobs = 4
 	}
-	s := &Server{router: chi.NewRouter(), logger: cfg.Logger, timeout: cfg.RequestTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, vfsCacheRoot: cfg.VFSCacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots), httpAllowedHosts: cleanHTTPAllowedHosts(cfg.HTTPAllowedHosts), configPath: cfg.ConfigPath, libraries: normalizeLibraries(cfg.Libraries), profiles: normalizeProfiles(cfg.Profiles), libraryVFS: map[string]*libraryVFS{}}
+	if cfg.HardwareDecoderIdleTimeout <= 0 {
+		cfg.HardwareDecoderIdleTimeout = 30 * time.Second
+	}
+	s := &Server{router: chi.NewRouter(), logger: cfg.Logger, timeout: cfg.RequestTimeout, hardwareDecoderIdleTimeout: cfg.HardwareDecoderIdleTimeout, keys: cfg.APIKeys, rate: newRateLimiter(cfg.RateLimitPerMinute), jobs: NewJobManager(cfg.MaxConcurrentJobs), dynHLS: NewDynamicHLSManager(cfg.MaxConcurrentJobs), dynDASH: NewDynamicDASHManager(cfg.MaxConcurrentJobs), metrics: &Metrics{}, cacheRoot: cfg.CacheRoot, vfsCacheRoot: cfg.VFSCacheRoot, allowedInputRoots: cleanRoots(cfg.AllowedInputRoots), httpAllowedHosts: cleanHTTPAllowedHosts(cfg.HTTPAllowedHosts), configPath: cfg.ConfigPath, libraries: normalizeLibraries(cfg.Libraries), profiles: normalizeProfiles(cfg.Profiles), libraryVFS: map[string]*libraryVFS{}}
 	s.routes(cfg.CORS)
 	return s
 }
@@ -121,6 +126,7 @@ func (s *Server) Close() {
 		}
 	}
 	for _, sess := range dashSessions {
+		sess.closeVideoDecoder()
 		if sess.InputCleanup != nil {
 			sess.InputCleanup()
 		}

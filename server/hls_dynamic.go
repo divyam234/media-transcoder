@@ -51,23 +51,24 @@ type DynamicHLSVariant struct {
 }
 
 type DynamicHLSSession struct {
-	ID              string
-	InputPath       string
-	Options         transcoder.HLSOptions
-	Variants        []DynamicHLSVariant
-	CacheDir        string
-	PrewarmSegments int
-	Info            transcoder.MediaInfo
-	CreatedAt       time.Time
-	SourceKey       string
-	InputCleanup    func()
-	ctx             context.Context
-	cancel          context.CancelFunc
-	codecMu         sync.Mutex
-	prewarmMu       sync.Mutex
-	decoderMu       sync.Mutex
-	videoDecoder    *transcoder.FMP4VideoDecoder
-	decoderTimer    *time.Timer
+	ID                 string
+	InputPath          string
+	Options            transcoder.HLSOptions
+	Variants           []DynamicHLSVariant
+	CacheDir           string
+	PrewarmSegments    int
+	Info               transcoder.MediaInfo
+	CreatedAt          time.Time
+	SourceKey          string
+	InputCleanup       func()
+	ctx                context.Context
+	cancel             context.CancelFunc
+	codecMu            sync.Mutex
+	prewarmMu          sync.Mutex
+	decoderMu          sync.Mutex
+	videoDecoder       *transcoder.FMP4VideoDecoder
+	decoderTimer       *time.Timer
+	decoderIdleTimeout time.Duration
 }
 
 func (sess *DynamicHLSSession) getVideoDecoder(opts transcoder.TranscodeOptions) (*transcoder.FMP4VideoDecoder, error) {
@@ -93,7 +94,11 @@ func (sess *DynamicHLSSession) scheduleVideoDecoderClose() {
 	if sess.decoderTimer != nil {
 		sess.decoderTimer.Stop()
 	}
-	sess.decoderTimer = time.AfterFunc(15*time.Second, func() {
+	timeout := sess.decoderIdleTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	sess.decoderTimer = time.AfterFunc(timeout, func() {
 		sess.decoderMu.Lock()
 		defer sess.decoderMu.Unlock()
 		if sess.videoDecoder != nil {
@@ -273,7 +278,7 @@ func (s *Server) createDynamicHLSSession(ctx context.Context, w http.ResponseWri
 		return
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
-	sess := &DynamicHLSSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, SourceKey: resolved.SourceKey, Options: req.Options, CacheDir: cacheDir, PrewarmSegments: req.PrewarmSegments, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel}
+	sess := &DynamicHLSSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, SourceKey: resolved.SourceKey, Options: req.Options, CacheDir: cacheDir, PrewarmSegments: req.PrewarmSegments, Info: info, CreatedAt: time.Now(), ctx: sessCtx, cancel: cancel, decoderIdleTimeout: s.hardwareDecoderIdleTimeout}
 	sess.Variants = buildHLSVariants(req.Options, req.Variants, info)
 	s.dynHLS.Add(sess)
 	keepInput = true
