@@ -151,6 +151,7 @@ typedef struct TCSharedHWDevice {
     enum AVHWDeviceType type;
     char *device;
     AVBufferRef *ctx;
+    unsigned users;
     struct TCSharedHWDevice *next;
 } TCSharedHWDevice;
 
@@ -163,6 +164,7 @@ static AVBufferRef *tc_hw_device_ref(enum AVHWDeviceType type, const char *devic
     for (TCSharedHWDevice *entry = g_hw_devices; entry; entry = entry->next) {
         if (entry->type == type && strcmp(entry->device, key) == 0) {
             AVBufferRef *ref = av_buffer_ref(entry->ctx);
+            if (ref) entry->users++;
             pthread_mutex_unlock(&g_hw_device_mu);
             if (!ref) set_error("av_buffer_ref shared hardware device failed");
             return ref;
@@ -193,12 +195,40 @@ static AVBufferRef *tc_hw_device_ref(enum AVHWDeviceType type, const char *devic
     }
     entry->type = type;
     entry->ctx = ctx;
+    entry->users = 1;
     entry->next = g_hw_devices;
     g_hw_devices = entry;
     AVBufferRef *ref = av_buffer_ref(ctx);
+    if (!ref) {
+        g_hw_devices = entry->next;
+        free(entry->device);
+        av_buffer_unref(&entry->ctx);
+        free(entry);
+    }
     pthread_mutex_unlock(&g_hw_device_mu);
     if (!ref) set_error("av_buffer_ref shared hardware device failed");
     return ref;
+}
+
+static void tc_hw_device_release(AVBufferRef *ctx) {
+    if (!ctx) return;
+    pthread_mutex_lock(&g_hw_device_mu);
+    TCSharedHWDevice **link = &g_hw_devices;
+    while (*link) {
+        TCSharedHWDevice *entry = *link;
+        if (entry->ctx && entry->ctx->data == ctx->data) {
+            if (entry->users > 0) entry->users--;
+            if (entry->users == 0) {
+                *link = entry->next;
+                av_buffer_unref(&entry->ctx);
+                free(entry->device);
+                free(entry);
+            }
+            break;
+        }
+        link = &entry->next;
+    }
+    pthread_mutex_unlock(&g_hw_device_mu);
 }
 
 const char *tc_last_error(void) { return g_last_error; }
@@ -385,8 +415,9 @@ static void decoder_close(TCDecoder *d) {
     if (d->pkt) av_packet_free(&d->pkt);
     if (d->adec) avcodec_free_context(&d->adec);
     av_buffer_unref(&d->hw_frames_ctx);
-    av_buffer_unref(&d->hw_device_ctx);
     if (d->dec) avcodec_free_context(&d->dec);
+    tc_hw_device_release(d->hw_device_ctx);
+    av_buffer_unref(&d->hw_device_ctx);
     tc_close_input(&d->fmt, &d->custom_input);
     free(d);
 }
@@ -993,8 +1024,8 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     } else if (use_vaapi) {
         const char *vaapi_device = hardware_device ? hardware_device : "/dev/dri/renderD128";
         if (zero_copy_vaapi) hw_device_ctx = av_buffer_ref(dec->hw_device_ctx);
-        else hw_device_ctx = tc_hw_device_ref(AV_HWDEVICE_TYPE_VAAPI, vaapi_device);
-        if (!zero_copy_vaapi && !hw_device_ctx) { avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return AVERROR(EINVAL); }
+        else ret = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI, vaapi_device, NULL, 0);
+        if (!zero_copy_vaapi && ret < 0) { set_av_error("av_hwdevice_ctx_create(vaapi)", ret); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return ret; }
         if (zero_copy_vaapi) { AVBufferRef *sink_hw = av_buffersink_get_hw_frames_ctx(sink_ctx); if (sink_hw) hw_frames_ctx = av_buffer_ref(sink_hw); }
         else {
             hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);
