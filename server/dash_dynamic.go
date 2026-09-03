@@ -249,6 +249,11 @@ func (s *Server) createDynamicDASHSession(ctx context.Context, w http.ResponseWr
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	fps := req.Options.FPS
+	if fps <= 0 {
+		fps = info.FPS
+	}
+	req.Options.SegmentSeconds = alignDASHSegmentSeconds(req.Options.SegmentSeconds, fps)
 	audioOpts := req.Options.TranscodeOptions
 	audioOpts.AudioMode = requestedAudioMode
 	if info.HasAudio {
@@ -388,6 +393,22 @@ func (s *Server) writeDASHManifest(w http.ResponseWriter, sess *DynamicDASHSessi
 	_, _ = w.Write([]byte(buildDynamicDASHMPD(sess)))
 }
 
+const dashTimelineTimescale = 1_000_000
+
+func alignDASHSegmentSeconds(segmentSeconds, fps float64) float64 {
+	if segmentSeconds <= 0 {
+		segmentSeconds = 4
+	}
+	if fps <= 1 || fps > 120 {
+		return segmentSeconds
+	}
+	frames := math.Round(segmentSeconds * fps)
+	if frames < 1 {
+		frames = 1
+	}
+	return frames / fps
+}
+
 func dashSegmentWindow(duration, segmentSeconds float64, idx int) (start, length float64, ok bool) {
 	if segmentSeconds <= 0 {
 		segmentSeconds = 4
@@ -407,7 +428,7 @@ func writeDASHSegmentTimeline(b *strings.Builder, duration, segmentSeconds float
 	if segmentSeconds <= 0 {
 		segmentSeconds = 4
 	}
-	timescale := 1000
+	timescale := dashTimelineTimescale
 	full := int(math.Floor(duration / segmentSeconds))
 	last := duration - float64(full)*segmentSeconds
 	b.WriteString(`          <SegmentTimeline>` + "\n")
@@ -458,7 +479,7 @@ func buildDynamicDASHMPD(sess *DynamicDASHSession) string {
 		} else {
 			b.WriteString(fmt.Sprintf(`      <Representation id="%s" bandwidth="%d" width="%d" height="%d" codecs="%s">`+"\n", v.Name, bandwidth, v.Width, v.Height, codecs))
 		}
-		b.WriteString(fmt.Sprintf(`        <SegmentTemplate timescale="1000" startNumber="0" initialization="%sinit.mp4" media="%s$Number%%06d$.m4s">`+"\n", prefix, prefix))
+		b.WriteString(fmt.Sprintf(`        <SegmentTemplate timescale="%d" startNumber="0" initialization="%sinit.mp4" media="%s$Number%%06d$.m4s">`+"\n", dashTimelineTimescale, prefix, prefix))
 		writeDASHSegmentTimeline(&b, dur, segDur)
 		b.WriteString("        </SegmentTemplate>\n")
 		b.WriteString("      </Representation>\n")
@@ -484,7 +505,7 @@ func buildDynamicDASHMPD(sess *DynamicDASHSession) string {
 		}
 		b.WriteString(fmt.Sprintf(`      <Representation id="audio" bandwidth="%d" audioSamplingRate="%d" codecs="%s">`+"\n", bandwidth, sampleRate, audioCodec))
 		b.WriteString(fmt.Sprintf(`        <AudioChannelConfiguration schemeIdUri="urn:mpeg:dash:23003:3:audio_channel_configuration:2011" value="%d"/>`+"\n", channels))
-		b.WriteString(`        <SegmentTemplate timescale="1000" startNumber="0" initialization="audio/segment/init.mp4" media="audio/segment/$Number%06d$.m4s">` + "\n")
+		b.WriteString(fmt.Sprintf(`        <SegmentTemplate timescale="%d" startNumber="0" initialization="audio/segment/init.mp4" media="audio/segment/$Number%%06d$.m4s">`+"\n", dashTimelineTimescale))
 		writeDASHSegmentTimeline(&b, dur, segDur)
 		b.WriteString("        </SegmentTemplate>\n")
 		b.WriteString("      </Representation>\n")

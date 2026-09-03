@@ -111,11 +111,20 @@ func TestDASHSegmentTimelineIncludesFinalPartialSegment(t *testing.T) {
 		Info:    transcoder.MediaInfo{Duration: 10.25, Width: 640, Height: 360, FPS: 24},
 	}
 	mpd := buildDynamicDASHMPD(sess)
-	if !strings.Contains(mpd, `<S t="0" d="4000" r="1"/>`) {
+	if !strings.Contains(mpd, `<S t="0" d="4000000" r="1"/>`) {
 		t.Fatalf("missing repeated full segments in MPD:\n%s", mpd)
 	}
-	if !strings.Contains(mpd, `<S d="2250"/>`) {
+	if !strings.Contains(mpd, `<S d="2250000"/>`) {
 		t.Fatalf("missing final partial segment in MPD:\n%s", mpd)
+	}
+}
+
+func TestAlignDASHSegmentSecondsToFrameClock(t *testing.T) {
+	if got := alignDASHSegmentSeconds(4, 24000.0/1001.0); math.Abs(got-4.004) > 0.00001 {
+		t.Fatalf("23.976fps segment duration = %.9f", got)
+	}
+	if got := alignDASHSegmentSeconds(4, 24); got != 4 {
+		t.Fatalf("24fps segment duration = %.9f", got)
 	}
 }
 

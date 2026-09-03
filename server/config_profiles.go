@@ -556,6 +556,11 @@ func (s *Server) ensureLibraryDASHSession(ctx context.Context, profileID, librar
 		return nil, err
 	}
 	opts := p.DASHOptions()
+	fps := opts.FPS
+	if fps <= 0 {
+		fps = info.FPS
+	}
+	opts.SegmentSeconds = alignDASHSegmentSeconds(opts.SegmentSeconds, fps)
 	audioOpts := opts.TranscodeOptions
 	if info.HasAudio {
 		if audioOpts.AudioMode == "" {
