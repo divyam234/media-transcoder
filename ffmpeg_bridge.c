@@ -146,6 +146,61 @@ static void set_av_error(const char *prefix, int err) {
     set_error("%s: %s (%d)", prefix, buf, err);
 }
 
+
+typedef struct TCSharedHWDevice {
+    enum AVHWDeviceType type;
+    char *device;
+    AVBufferRef *ctx;
+    struct TCSharedHWDevice *next;
+} TCSharedHWDevice;
+
+static pthread_mutex_t g_hw_device_mu = PTHREAD_MUTEX_INITIALIZER;
+static TCSharedHWDevice *g_hw_devices = NULL;
+
+static AVBufferRef *tc_hw_device_ref(enum AVHWDeviceType type, const char *device) {
+    const char *key = device ? device : "";
+    pthread_mutex_lock(&g_hw_device_mu);
+    for (TCSharedHWDevice *entry = g_hw_devices; entry; entry = entry->next) {
+        if (entry->type == type && strcmp(entry->device, key) == 0) {
+            AVBufferRef *ref = av_buffer_ref(entry->ctx);
+            pthread_mutex_unlock(&g_hw_device_mu);
+            if (!ref) set_error("av_buffer_ref shared hardware device failed");
+            return ref;
+        }
+    }
+
+    AVBufferRef *ctx = NULL;
+    int ret = av_hwdevice_ctx_create(&ctx, type, key[0] ? key : NULL, NULL, 0);
+    if (ret < 0) {
+        pthread_mutex_unlock(&g_hw_device_mu);
+        set_av_error("av_hwdevice_ctx_create", ret);
+        return NULL;
+    }
+    TCSharedHWDevice *entry = (TCSharedHWDevice *)calloc(1, sizeof(*entry));
+    if (!entry) {
+        av_buffer_unref(&ctx);
+        pthread_mutex_unlock(&g_hw_device_mu);
+        set_error("calloc shared hardware device failed");
+        return NULL;
+    }
+    entry->device = strdup(key);
+    if (!entry->device) {
+        free(entry);
+        av_buffer_unref(&ctx);
+        pthread_mutex_unlock(&g_hw_device_mu);
+        set_error("strdup shared hardware device failed");
+        return NULL;
+    }
+    entry->type = type;
+    entry->ctx = ctx;
+    entry->next = g_hw_devices;
+    g_hw_devices = entry;
+    AVBufferRef *ref = av_buffer_ref(ctx);
+    pthread_mutex_unlock(&g_hw_device_mu);
+    if (!ref) set_error("av_buffer_ref shared hardware device failed");
+    return ref;
+}
+
 const char *tc_last_error(void) { return g_last_error; }
 
 static int tc_cancelled(const TCTranscodeOptions *opts) {
@@ -416,8 +471,8 @@ static TCDecoder *decoder_open(const char *input_path, const char *encoder_name,
             return NULL;
         }
         const char *device = hardware_device && hardware_device[0] ? hardware_device : (device_type == AV_HWDEVICE_TYPE_CUDA ? "0" : "/dev/dri/renderD128");
-        ret = av_hwdevice_ctx_create(&d->hw_device_ctx, device_type, device, NULL, 0);
-        if (ret < 0) { set_av_error(device_type == AV_HWDEVICE_TYPE_CUDA ? "av_hwdevice_ctx_create(cuda decode)" : "av_hwdevice_ctx_create(vaapi decode)", ret); decoder_close(d); return NULL; }
+        d->hw_device_ctx = tc_hw_device_ref(device_type, device);
+        if (!d->hw_device_ctx) { decoder_close(d); return NULL; }
         d->hw_frames_ctx = av_hwframe_ctx_alloc(d->hw_device_ctx);
         if (!d->hw_frames_ctx) { set_error("av_hwframe_ctx_alloc hardware decode failed"); decoder_close(d); return NULL; }
         AVHWFramesContext *frames = (AVHWFramesContext *)d->hw_frames_ctx->data;
@@ -425,7 +480,7 @@ static TCDecoder *decoder_open(const char *input_path, const char *encoder_name,
         frames->sw_format = hardware_sw_format((enum AVPixelFormat)d->stream->codecpar->format);
         frames->width = d->dec->width;
         frames->height = d->dec->height;
-        frames->initial_pool_size = 32;
+        frames->initial_pool_size = 20;
         ret = av_hwframe_ctx_init(d->hw_frames_ctx);
         if (ret < 0) { set_av_error("av_hwframe_ctx_init hardware decode", ret); decoder_close(d); return NULL; }
         d->dec->opaque = d;
@@ -938,8 +993,8 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     } else if (use_vaapi) {
         const char *vaapi_device = hardware_device ? hardware_device : "/dev/dri/renderD128";
         if (zero_copy_vaapi) hw_device_ctx = av_buffer_ref(dec->hw_device_ctx);
-        else ret = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI, vaapi_device, NULL, 0);
-        if (!zero_copy_vaapi && ret < 0) { set_av_error("av_hwdevice_ctx_create(vaapi)", ret); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return ret; }
+        else hw_device_ctx = tc_hw_device_ref(AV_HWDEVICE_TYPE_VAAPI, vaapi_device);
+        if (!zero_copy_vaapi && !hw_device_ctx) { avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return AVERROR(EINVAL); }
         if (zero_copy_vaapi) { AVBufferRef *sink_hw = av_buffersink_get_hw_frames_ctx(sink_ctx); if (sink_hw) hw_frames_ctx = av_buffer_ref(sink_hw); }
         else {
             hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);

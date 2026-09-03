@@ -504,7 +504,7 @@ func (s *Server) ensureLibraryHLSSession(ctx context.Context, profileID, library
 	}
 	sessCtx, cancel := context.WithCancel(context.Background())
 	sourceKey := "hls|" + profileID + "|" + libraryID + "|" + rel
-	sess := &DynamicHLSSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, Options: opts, Variants: buildHLSVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 3, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
+	sess := &DynamicHLSSession{ID: id, InputPath: resolved.Input, InputCleanup: resolved.Cleanup, Options: opts, Variants: buildHLSVariants(opts, p.Variants, info), CacheDir: cacheDir, PrewarmSegments: 2, Info: info, CreatedAt: time.Now(), SourceKey: sourceKey, ctx: sessCtx, cancel: cancel}
 	for _, stale := range s.dynHLS.ReplaceSourceSession(sess) {
 		if stale.cancel != nil {
 			stale.cancel()
