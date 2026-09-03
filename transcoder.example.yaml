@@ -91,6 +91,7 @@ profiles:
     video:
       codec: h264
       encoder_name: h264_nvenc
+      hardware_decode: true
       preset: fastest
       crf: 23
       gop_size: 96
@@ -166,6 +167,7 @@ profiles:
     video:
       codec: h264
       encoder_name: h264_nvenc
+      hardware_decode: true
       preset: fastest
       crf: 23
       gop_size: 96

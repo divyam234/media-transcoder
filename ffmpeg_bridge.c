@@ -319,16 +319,17 @@ static void decoder_close(TCDecoder *d) {
     free(d);
 }
 
-static enum AVPixelFormat vaapi_get_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
+static enum AVPixelFormat hardware_get_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
     TCDecoder *d = (TCDecoder *)ctx->opaque;
+    if (!d) return AV_PIX_FMT_NONE;
     for (const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-        if (*p == AV_PIX_FMT_VAAPI) return *p;
+        if (*p == d->hw_pix_fmt) return *p;
     }
-    if (d) set_error("decoder does not expose a VAAPI hardware pixel format");
+    set_error("decoder does not expose requested hardware pixel format %s", av_get_pix_fmt_name(d->hw_pix_fmt));
     return AV_PIX_FMT_NONE;
 }
 
-static enum AVPixelFormat vaapi_sw_format(enum AVPixelFormat input) {
+static enum AVPixelFormat hardware_sw_format(enum AVPixelFormat input) {
     switch (input) {
         case AV_PIX_FMT_YUV420P10LE:
         case AV_PIX_FMT_P010LE:
@@ -338,15 +339,27 @@ static enum AVPixelFormat vaapi_sw_format(enum AVPixelFormat input) {
     }
 }
 
-static int decoder_supports_vaapi(const AVCodec *codec) {
+static int decoder_supports_hw(const AVCodec *codec, enum AVHWDeviceType device_type, enum AVPixelFormat pix_fmt) {
     for (int i = 0;; i++) {
         const AVCodecHWConfig *cfg = avcodec_get_hw_config(codec, i);
         if (!cfg) return 0;
-        if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && cfg->device_type == AV_HWDEVICE_TYPE_VAAPI && cfg->pix_fmt == AV_PIX_FMT_VAAPI) return 1;
+        if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && cfg->device_type == device_type && cfg->pix_fmt == pix_fmt) return 1;
     }
 }
 
-static TCDecoder *decoder_open(const char *input_path, const char *hardware_device, int hardware_decode) {
+static enum AVHWDeviceType hardware_device_type_for_encoder(const char *encoder_name) {
+    if (encoder_name && strstr(encoder_name, "_nvenc")) return AV_HWDEVICE_TYPE_CUDA;
+    if (encoder_name && strstr(encoder_name, "_vaapi")) return AV_HWDEVICE_TYPE_VAAPI;
+    return AV_HWDEVICE_TYPE_NONE;
+}
+
+static enum AVPixelFormat hardware_pix_fmt_for_device(enum AVHWDeviceType device_type) {
+    if (device_type == AV_HWDEVICE_TYPE_CUDA) return AV_PIX_FMT_CUDA;
+    if (device_type == AV_HWDEVICE_TYPE_VAAPI) return AV_PIX_FMT_VAAPI;
+    return AV_PIX_FMT_NONE;
+}
+
+static TCDecoder *decoder_open(const char *input_path, const char *encoder_name, const char *hardware_device, int hardware_decode) {
     if (!input_path) { set_error("decoder_open: nil input"); return NULL; }
     ffmpeg_init();
     TCDecoder *d = (TCDecoder *)calloc(1, sizeof(TCDecoder));
@@ -373,24 +386,36 @@ static TCDecoder *decoder_open(const char *input_path, const char *hardware_devi
     ret = avcodec_parameters_to_context(d->dec, d->stream->codecpar);
     if (ret < 0) { set_av_error("avcodec_parameters_to_context", ret); decoder_close(d); return NULL; }
     if (hardware_decode) {
-        if (!decoder_supports_vaapi(codec)) { set_error("decoder %s does not support VAAPI", codec->name); decoder_close(d); return NULL; }
-        const char *device = hardware_device && hardware_device[0] ? hardware_device : "/dev/dri/renderD128";
-        ret = av_hwdevice_ctx_create(&d->hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI, device, NULL, 0);
-        if (ret < 0) { set_av_error("av_hwdevice_ctx_create(vaapi decode)", ret); decoder_close(d); return NULL; }
+        enum AVHWDeviceType device_type = hardware_device_type_for_encoder(encoder_name);
+        enum AVPixelFormat hw_pix_fmt = hardware_pix_fmt_for_device(device_type);
+        if (device_type == AV_HWDEVICE_TYPE_NONE || hw_pix_fmt == AV_PIX_FMT_NONE) {
+            set_error("hardware decode is supported for VAAPI and NVENC encoders");
+            decoder_close(d);
+            return NULL;
+        }
+        if (!decoder_supports_hw(codec, device_type, hw_pix_fmt)) {
+            set_error("decoder %s does not support %s hardware decode", codec->name, av_hwdevice_get_type_name(device_type));
+            decoder_close(d);
+            return NULL;
+        }
+        const char *device = hardware_device && hardware_device[0] ? hardware_device : (device_type == AV_HWDEVICE_TYPE_CUDA ? "0" : "/dev/dri/renderD128");
+        ret = av_hwdevice_ctx_create(&d->hw_device_ctx, device_type, device, NULL, 0);
+        if (ret < 0) { set_av_error(device_type == AV_HWDEVICE_TYPE_CUDA ? "av_hwdevice_ctx_create(cuda decode)" : "av_hwdevice_ctx_create(vaapi decode)", ret); decoder_close(d); return NULL; }
         d->hw_frames_ctx = av_hwframe_ctx_alloc(d->hw_device_ctx);
-        if (!d->hw_frames_ctx) { set_error("av_hwframe_ctx_alloc(vaapi decode) failed"); decoder_close(d); return NULL; }
+        if (!d->hw_frames_ctx) { set_error("av_hwframe_ctx_alloc hardware decode failed"); decoder_close(d); return NULL; }
         AVHWFramesContext *frames = (AVHWFramesContext *)d->hw_frames_ctx->data;
-        frames->format = AV_PIX_FMT_VAAPI;
-        frames->sw_format = vaapi_sw_format((enum AVPixelFormat)d->stream->codecpar->format);
+        frames->format = hw_pix_fmt;
+        frames->sw_format = hardware_sw_format((enum AVPixelFormat)d->stream->codecpar->format);
         frames->width = d->dec->width;
         frames->height = d->dec->height;
         frames->initial_pool_size = 32;
         ret = av_hwframe_ctx_init(d->hw_frames_ctx);
-        if (ret < 0) { set_av_error("av_hwframe_ctx_init(vaapi decode)", ret); decoder_close(d); return NULL; }
+        if (ret < 0) { set_av_error("av_hwframe_ctx_init hardware decode", ret); decoder_close(d); return NULL; }
         d->dec->opaque = d;
-        d->dec->get_format = vaapi_get_format;
+        d->dec->get_format = hardware_get_format;
         d->dec->hw_device_ctx = av_buffer_ref(d->hw_device_ctx);
-        d->hw_pix_fmt = AV_PIX_FMT_VAAPI;
+        d->dec->hw_frames_ctx = av_buffer_ref(d->hw_frames_ctx);
+        d->hw_pix_fmt = hw_pix_fmt;
         d->hardware_decode = 1;
     }
     ret = avcodec_open2(d->dec, codec, NULL);
@@ -479,7 +504,7 @@ static int drain_filter_to_encoder(
         filt_frame->pict_type = AV_PICTURE_TYPE_NONE;
         filt_frame->flags &= ~AV_FRAME_FLAG_KEY;
         *last_pts = out_pts;
-        if (filt_frame->format == AV_PIX_FMT_VAAPI) {
+        if (filt_frame->format == AV_PIX_FMT_VAAPI || filt_frame->format == AV_PIX_FMT_CUDA) {
             ret = encode_video_frame(ofmt, enc, out_st, enc_pkt, filt_frame);
         } else if (hw_frames_ctx) {
             AVFrame *hw_frame = av_frame_alloc();
@@ -518,6 +543,7 @@ static int init_video_filter(
     AVRational fps,
     enum AVPixelFormat output_pix_fmt,
     int use_vaapi,
+    int use_cuda,
     AVBufferRef *hw_device_ctx,
     AVBufferRef *hw_frames_ctx,
     AVFilterGraph **graph_out,
@@ -545,15 +571,15 @@ static int init_video_filter(
     AVRational tb = dec->stream->time_base;
     if (tb.num <= 0 || tb.den <= 0) tb = (AVRational){1, 1000000};
 
-    enum AVPixelFormat source_pix_fmt = use_vaapi ? AV_PIX_FMT_VAAPI : dec->dec->pix_fmt;
+    enum AVPixelFormat source_pix_fmt = use_cuda ? AV_PIX_FMT_CUDA : (use_vaapi ? AV_PIX_FMT_VAAPI : dec->dec->pix_fmt);
     snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
         dec->dec->width, dec->dec->height, source_pix_fmt, tb.num, tb.den, sar.num, sar.den);
-    if (use_vaapi) {
+    if (use_vaapi || use_cuda) {
         src_ctx = avfilter_graph_alloc_filter(graph, buffersrc, "in");
         if (!src_ctx) { ret = AVERROR(ENOMEM); goto fail; }
         AVBufferSrcParameters *params = av_buffersrc_parameters_alloc();
         if (!params) { ret = AVERROR(ENOMEM); goto fail; }
-        params->format = AV_PIX_FMT_VAAPI;
+        params->format = source_pix_fmt;
         params->width = dec->dec->width;
         params->height = dec->dec->height;
         params->time_base = tb;
@@ -562,9 +588,9 @@ static int init_video_filter(
         ret = av_buffersrc_parameters_set(src_ctx, params);
         av_buffer_unref(&params->hw_frames_ctx);
         av_free(params);
-        if (ret < 0) { set_av_error("av_buffersrc_parameters_set(vaapi)", ret); goto fail; }
+        if (ret < 0) { set_av_error("av_buffersrc_parameters_set hardware", ret); goto fail; }
         ret = avfilter_init_str(src_ctx, NULL);
-        if (ret < 0) { set_av_error("avfilter_init_str buffer(vaapi)", ret); goto fail; }
+        if (ret < 0) { set_av_error("avfilter_init_str hardware buffer", ret); goto fail; }
     } else {
         ret = avfilter_graph_create_filter(&src_ctx, buffersrc, "in", args, NULL, graph);
         if (ret < 0) { set_av_error("avfilter_graph_create_filter buffer", ret); goto fail; }
@@ -584,6 +610,15 @@ static int init_video_filter(
             snprintf(filter_descr, sizeof(filter_descr), "crop=%d:%d:%d:%d,fps=%d/%d,scale_vaapi=w=%d:h=%d:format=%s", crop_width, crop_height, crop_x, crop_y, fps.num, fps.den, crop_width, crop_height, pix_fmt_name);
         } else if (target_width > 0) snprintf(filter_descr, sizeof(filter_descr), "fps=%d/%d,scale_vaapi=w=%d:h=-2:format=%s", fps.num, fps.den, target_width, pix_fmt_name);
         else snprintf(filter_descr, sizeof(filter_descr), "fps=%d/%d,scale_vaapi=format=%s", fps.num, fps.den, pix_fmt_name);
+    } else if (use_cuda) {
+        if (use_crop && target_width > 0) {
+            int target_height = ((int)llround((double)target_width * (double)crop_height / (double)crop_width)) & ~1;
+            if (target_height < 2) target_height = 2;
+            snprintf(filter_descr, sizeof(filter_descr), "crop=%d:%d:%d:%d,fps=%d/%d,scale_cuda=w=%d:h=%d:format=%s", crop_width, crop_height, crop_x, crop_y, fps.num, fps.den, target_width, target_height, pix_fmt_name);
+        } else if (use_crop) {
+            snprintf(filter_descr, sizeof(filter_descr), "crop=%d:%d:%d:%d,fps=%d/%d,scale_cuda=w=%d:h=%d:format=%s", crop_width, crop_height, crop_x, crop_y, fps.num, fps.den, crop_width, crop_height, pix_fmt_name);
+        } else if (target_width > 0) snprintf(filter_descr, sizeof(filter_descr), "fps=%d/%d,scale_cuda=w=%d:h=-2:format=%s", fps.num, fps.den, target_width, pix_fmt_name);
+        else snprintf(filter_descr, sizeof(filter_descr), "fps=%d/%d,scale_cuda=format=%s", fps.num, fps.den, pix_fmt_name);
     } else {
         if (use_crop && target_width > 0) snprintf(filter_descr, sizeof(filter_descr), "crop=%d:%d:%d:%d,scale=%d:-2:flags=fast_bilinear,fps=%d/%d,format=%s", crop_width, crop_height, crop_x, crop_y, target_width, fps.num, fps.den, pix_fmt_name);
         else if (use_crop) snprintf(filter_descr, sizeof(filter_descr), "crop=%d:%d:%d:%d,fps=%d/%d,format=%s", crop_width, crop_height, crop_x, crop_y, fps.num, fps.den, pix_fmt_name);
@@ -596,10 +631,11 @@ static int init_video_filter(
     if (!outputs->name || !inputs->name) { set_error("av_strdup filter endpoint failed"); ret = AVERROR(ENOMEM); goto fail; }
     ret = avfilter_graph_parse_ptr(graph, filter_descr, &inputs, &outputs, NULL);
     if (ret < 0) { set_av_error("avfilter_graph_parse_ptr", ret); goto fail; }
-    if (use_vaapi) {
+    if (use_vaapi || use_cuda) {
+        const char *scale_filter = use_cuda ? "scale_cuda" : "scale_vaapi";
         for (unsigned int i = 0; i < graph->nb_filters; i++) {
             AVFilterContext *f = graph->filters[i];
-            if (f && f->filter && strcmp(f->filter->name, "scale_vaapi") == 0) f->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+            if (f && f->filter && strcmp(f->filter->name, scale_filter) == 0) f->hw_device_ctx = av_buffer_ref(hw_device_ctx);
         }
     }
     ret = avfilter_graph_config(graph, NULL);
@@ -791,9 +827,11 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     const char *preset = opts ? opt_str(opts->preset, "ultrafast") : "ultrafast";
     const char *encoder_name = (opts && opts->encoder_name && opts->encoder_name[0]) ? opts->encoder_name : NULL;
     const char *format_name = (opts && opts->format && opts->format[0]) ? opts->format : NULL;
-    const char *hardware_device = (opts && opts->hardware_device && opts->hardware_device[0]) ? opts->hardware_device : "/dev/dri/renderD128";
+    const char *hardware_device = (opts && opts->hardware_device && opts->hardware_device[0]) ? opts->hardware_device : NULL;
     int use_vaapi = encoder_name && strstr(encoder_name, "_vaapi") != NULL;
-    int zero_copy_vaapi = use_vaapi && dec->hardware_decode;
+    int use_nvenc = encoder_name && strstr(encoder_name, "_nvenc") != NULL;
+    int zero_copy_vaapi = use_vaapi && dec->hardware_decode && dec->hw_pix_fmt == AV_PIX_FMT_VAAPI;
+    int zero_copy_cuda = use_nvenc && dec->hardware_decode && dec->hw_pix_fmt == AV_PIX_FMT_CUDA;
     double start_time = (opts && opts->start_time > 0.0) ? opts->start_time : 0.0;
     double duration_limit = (opts && opts->duration > 0.0) ? opts->duration : 0.0;
     double end_time = duration_limit > 0.0 ? start_time + duration_limit : 0.0;
@@ -818,10 +856,11 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     AVFilterContext *src_ctx = NULL, *sink_ctx = NULL;
     int out_w = 0, out_h = 0;
     AVRational sink_tb = (AVRational){1, fps.num > 0 ? fps.num : 30};
-    enum AVPixelFormat filter_pix_fmt = use_vaapi ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
-    AVBufferRef *filter_device_ctx = zero_copy_vaapi ? dec->hw_device_ctx : NULL;
-    AVBufferRef *filter_frames_ctx = zero_copy_vaapi ? dec->hw_frames_ctx : NULL;
-    int ret = init_video_filter(dec, target_width, opts ? opts->crop_width : 0, opts ? opts->crop_height : 0, opts ? opts->crop_x : 0, opts ? opts->crop_y : 0, fps, filter_pix_fmt, zero_copy_vaapi, filter_device_ctx, filter_frames_ctx, &filter_graph, &src_ctx, &sink_ctx, &out_w, &out_h, &sink_tb);
+    int hardware_filter = zero_copy_vaapi || zero_copy_cuda;
+    enum AVPixelFormat filter_pix_fmt = hardware_filter ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+    AVBufferRef *filter_device_ctx = hardware_filter ? dec->hw_device_ctx : NULL;
+    AVBufferRef *filter_frames_ctx = hardware_filter ? dec->hw_frames_ctx : NULL;
+    int ret = init_video_filter(dec, target_width, opts ? opts->crop_width : 0, opts ? opts->crop_height : 0, opts ? opts->crop_x : 0, opts ? opts->crop_y : 0, fps, filter_pix_fmt, zero_copy_vaapi, zero_copy_cuda, filter_device_ctx, filter_frames_ctx, &filter_graph, &src_ctx, &sink_ctx, &out_w, &out_h, &sink_tb);
     if (ret < 0) { decoder_close(dec); return ret; }
     if (out_w <= 0 || out_h <= 0) { set_error("invalid filter output size %dx%d", out_w, out_h); avfilter_graph_free(&filter_graph); decoder_close(dec); return AVERROR(EINVAL); }
     if (out_w % 2) out_w++;
@@ -874,23 +913,28 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
 
     AVBufferRef *hw_device_ctx = NULL;
     AVBufferRef *hw_frames_ctx = NULL;
-    if (use_vaapi) {
+    if (zero_copy_cuda) {
+        hw_device_ctx = av_buffer_ref(dec->hw_device_ctx);
+        AVBufferRef *sink_hw = av_buffersink_get_hw_frames_ctx(sink_ctx);
+        if (sink_hw) hw_frames_ctx = av_buffer_ref(sink_hw);
+        if (!hw_frames_ctx) { set_error("CUDA filter did not expose hardware frames"); av_buffer_unref(&hw_device_ctx); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return AVERROR(EINVAL); }
+    } else if (use_vaapi) {
+        const char *vaapi_device = hardware_device ? hardware_device : "/dev/dri/renderD128";
         if (zero_copy_vaapi) hw_device_ctx = av_buffer_ref(dec->hw_device_ctx);
-        else ret = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI, hardware_device, NULL, 0);
+        else ret = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI, vaapi_device, NULL, 0);
         if (!zero_copy_vaapi && ret < 0) { set_av_error("av_hwdevice_ctx_create(vaapi)", ret); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return ret; }
         if (zero_copy_vaapi) { AVBufferRef *sink_hw = av_buffersink_get_hw_frames_ctx(sink_ctx); if (sink_hw) hw_frames_ctx = av_buffer_ref(sink_hw); }
         else {
-
-        hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);
-        if (!hw_frames_ctx) { set_error("av_hwframe_ctx_alloc failed"); av_buffer_unref(&hw_device_ctx); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return AVERROR(ENOMEM); }
-        AVHWFramesContext *frames = (AVHWFramesContext *)hw_frames_ctx->data;
-        frames->format = AV_PIX_FMT_VAAPI;
-        frames->sw_format = AV_PIX_FMT_NV12;
-        frames->width = out_w;
-        frames->height = out_h;
-        frames->initial_pool_size = 20;
-        ret = av_hwframe_ctx_init(hw_frames_ctx);
-        if (ret < 0) { set_av_error("av_hwframe_ctx_init(vaapi)", ret); av_buffer_unref(&hw_frames_ctx); av_buffer_unref(&hw_device_ctx); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return ret; }
+            hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);
+            if (!hw_frames_ctx) { set_error("av_hwframe_ctx_alloc failed"); av_buffer_unref(&hw_device_ctx); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return AVERROR(ENOMEM); }
+            AVHWFramesContext *frames = (AVHWFramesContext *)hw_frames_ctx->data;
+            frames->format = AV_PIX_FMT_VAAPI;
+            frames->sw_format = AV_PIX_FMT_NV12;
+            frames->width = out_w;
+            frames->height = out_h;
+            frames->initial_pool_size = 20;
+            ret = av_hwframe_ctx_init(hw_frames_ctx);
+            if (ret < 0) { set_av_error("av_hwframe_ctx_init(vaapi)", ret); av_buffer_unref(&hw_frames_ctx); av_buffer_unref(&hw_device_ctx); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return ret; }
         }
     }
 
@@ -898,8 +942,8 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     if (!enc) { set_error("avcodec_alloc_context3 encoder failed"); if (audio_filter_graph) avfilter_graph_free(&audio_filter_graph); if (aenc) avcodec_free_context(&aenc); avformat_free_context(ofmt); avfilter_graph_free(&filter_graph); decoder_close(dec); return AVERROR(ENOMEM); }
 
     enc->codec_id = codec_id; enc->codec_type = AVMEDIA_TYPE_VIDEO; enc->width = out_w; enc->height = out_h;
-    enc->pix_fmt = use_vaapi ? AV_PIX_FMT_VAAPI : AV_PIX_FMT_YUV420P; enc->time_base = av_inv_q(fps); enc->framerate = fps;
-    if (use_vaapi) enc->hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
+    enc->pix_fmt = zero_copy_cuda ? AV_PIX_FMT_CUDA : (use_vaapi ? AV_PIX_FMT_VAAPI : AV_PIX_FMT_YUV420P); enc->time_base = av_inv_q(fps); enc->framerate = fps;
+    if (use_vaapi || zero_copy_cuda) enc->hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
     enc->bit_rate = 0; enc->gop_size = gop_size; enc->max_b_frames = max_b_frames; enc->thread_count = 0;
     if (ofmt->oformat->flags & AVFMT_GLOBALHEADER) enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
@@ -1167,14 +1211,14 @@ fail:
 
 int tc_transcode_fmp4_segment_audio(const char *input_path, const char *output_path, const TCTranscodeOptions *opts) {
     if (!input_path || !output_path) return AVERROR(EINVAL);
-    TCDecoder *dec = decoder_open(input_path, NULL, 0);
+    TCDecoder *dec = decoder_open(input_path, NULL, NULL, 0);
     if (!dec) return AVERROR(EINVAL);
     return transcode_audio_segment_opts(dec, output_path, opts);
 }
 
 int tc_transcode_video(const char *input_path, const char *output_path, const TCTranscodeOptions *opts) {
     if (!input_path || !output_path) { set_error("tc_transcode_video: nil path"); return AVERROR(EINVAL); }
-    TCDecoder *dec = decoder_open(input_path, opts ? opts->hardware_device : NULL, opts && opts->hardware_decode);
+    TCDecoder *dec = decoder_open(input_path, opts ? opts->encoder_name : NULL, opts ? opts->hardware_device : NULL, opts && opts->hardware_decode);
     if (!dec) return AVERROR(EINVAL);
     return transcode_decoder_to_video_opts(dec, output_path, opts);
 }
@@ -1189,7 +1233,7 @@ int tc_transcode_hls_video(const char *input_path, const char *playlist_path, co
     if (local.hls_time <= 0.0) local.hls_time = 4.0;
     if (!local.hls_playlist_type) local.hls_playlist_type = "vod";
     if (!local.hls_segment_type) local.hls_segment_type = "mpegts";
-    TCDecoder *dec = decoder_open(input_path, opts ? opts->hardware_device : NULL, opts && opts->hardware_decode);
+    TCDecoder *dec = decoder_open(input_path, local.encoder_name, local.hardware_device, local.hardware_decode);
     if (!dec) return AVERROR(EINVAL);
     return transcode_decoder_to_video_opts(dec, playlist_path, &local);
 }
@@ -1200,7 +1244,7 @@ int tc_transcode_segment_video(const char *input_path, const char *output_path, 
     memset(&local, 0, sizeof(local));
     if (opts) local = *opts;
     local.format = "mpegts";
-    TCDecoder *dec = decoder_open(input_path, opts ? opts->hardware_device : NULL, opts && opts->hardware_decode);
+    TCDecoder *dec = decoder_open(input_path, local.encoder_name, local.hardware_device, local.hardware_decode);
     if (!dec) return AVERROR(EINVAL);
     return transcode_decoder_to_video_opts(dec, output_path, &local);
 }
@@ -1212,7 +1256,7 @@ int tc_transcode_fmp4_segment_video(const char *input_path, const char *output_p
     if (opts) local = *opts;
     local.format = "mp4";
     local.faststart = 0;
-    TCDecoder *dec = decoder_open(input_path, opts ? opts->hardware_device : NULL, opts && opts->hardware_decode);
+    TCDecoder *dec = decoder_open(input_path, local.encoder_name, local.hardware_device, local.hardware_decode);
     if (!dec) return AVERROR(EINVAL);
     return transcode_decoder_to_video_opts(dec, output_path, &local);
 }
@@ -1229,7 +1273,7 @@ int tc_transcode_dash_video(const char *input_path, const char *mpd_path, const 
     memset(&local, 0, sizeof(local));
     if (opts) local = *opts;
     local.format = "dash";
-    TCDecoder *dec = decoder_open(input_path, opts ? opts->hardware_device : NULL, opts && opts->hardware_decode);
+    TCDecoder *dec = decoder_open(input_path, local.encoder_name, local.hardware_device, local.hardware_decode);
     if (!dec) return AVERROR(EINVAL);
     return transcode_decoder_to_video_opts(dec, mpd_path, &local);
 }

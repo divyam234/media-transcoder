@@ -211,8 +211,12 @@ NVENC:
 ```yaml
 video:
   encoder_name: h264_nvenc
+  hardware_decode: true
+  hardware_device: "0" # optional; CUDA device 0 is the default
   preset: fastest
 ```
+
+With `hardware_decode: true`, NVENC profiles use CUDA/NVDEC hardware frames, `scale_cuda` for GPU scaling/crop materialization, and pass CUDA frames directly to NVENC without a CPU download.
 
 VAAPI:
 
