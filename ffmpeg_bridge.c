@@ -19,6 +19,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include <stdint.h>
 
 extern uintptr_t goAVIOOpen(uintptr_t factory_handle);
@@ -110,11 +114,24 @@ static __thread char g_last_error[1024];
 static pthread_once_t g_ffmpeg_init_once = PTHREAD_ONCE_INIT;
 
 static void ffmpeg_init_once(void) {
+#if defined(__GLIBC__)
+    // Segment jobs are short-lived and highly concurrent. Keep glibc from
+    // creating a large per-thread arena set that retains freed 4K frame
+    // buffers for the lifetime of the server process.
+    mallopt(M_ARENA_MAX, 4);
+    mallopt(M_TRIM_THRESHOLD, 128 * 1024);
+#endif
     av_log_set_level(AV_LOG_ERROR);
     avformat_network_init();
 }
 
 static void ffmpeg_init(void) { pthread_once(&g_ffmpeg_init_once, ffmpeg_init_once); }
+
+static void tc_native_trim(void) {
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#endif
+}
 
 static void set_error(const char *fmt, ...) {
     va_list ap;
@@ -1098,14 +1115,14 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     if (audio_enc_pkt) av_packet_free(&audio_enc_pkt); if (audio_filt_frame) av_frame_free(&audio_filt_frame);
     if (audio_filter_graph) avfilter_graph_free(&audio_filter_graph);
     avfilter_graph_free(&filter_graph); if (!(ofmt->oformat->flags & AVFMT_NOFILE)) avio_closep(&ofmt->pb);
-    if (aenc) avcodec_free_context(&aenc); avcodec_free_context(&enc); av_buffer_unref(&hw_frames_ctx); av_buffer_unref(&hw_device_ctx); avformat_free_context(ofmt); decoder_close(dec); return 0;
+    if (aenc) avcodec_free_context(&aenc); avcodec_free_context(&enc); av_buffer_unref(&hw_frames_ctx); av_buffer_unref(&hw_device_ctx); avformat_free_context(ofmt); decoder_close(dec); tc_native_trim(); return 0;
 
 fail:
     if (enc_pkt) av_packet_free(&enc_pkt); if (filt_frame) av_frame_free(&filt_frame);
     if (audio_enc_pkt) av_packet_free(&audio_enc_pkt); if (audio_filt_frame) av_frame_free(&audio_filt_frame);
     if (audio_filter_graph) avfilter_graph_free(&audio_filter_graph);
     if (filter_graph) avfilter_graph_free(&filter_graph); if (ofmt && !(ofmt->oformat->flags & AVFMT_NOFILE)) avio_closep(&ofmt->pb);
-    if (aenc) avcodec_free_context(&aenc); if (enc) avcodec_free_context(&enc); av_buffer_unref(&hw_frames_ctx); av_buffer_unref(&hw_device_ctx); if (ofmt) avformat_free_context(ofmt); decoder_close(dec);
+    if (aenc) avcodec_free_context(&aenc); if (enc) avcodec_free_context(&enc); av_buffer_unref(&hw_frames_ctx); av_buffer_unref(&hw_device_ctx); if (ofmt) avformat_free_context(ofmt); decoder_close(dec); tc_native_trim();
     return ret < 0 ? ret : AVERROR(EINVAL);
 }
 
