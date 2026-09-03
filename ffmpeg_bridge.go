@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"unsafe"
 )
 
@@ -21,6 +22,72 @@ func lastFFErr() string {
 		return "unknown ffmpeg error"
 	}
 	return C.GoString(s)
+}
+
+type FMP4VideoDecoder struct {
+	mu  sync.Mutex
+	ptr unsafe.Pointer
+}
+
+func NewFMP4VideoDecoder(input string, opts TranscodeOptions) (*FMP4VideoDecoder, error) {
+	cin := C.CString(input)
+	cencoder := C.CString(opts.EncoderName)
+	cdevice := C.CString(opts.HardwareDevice)
+	defer C.free(unsafe.Pointer(cin))
+	defer C.free(unsafe.Pointer(cencoder))
+	defer C.free(unsafe.Pointer(cdevice))
+	ptr := C.tc_fmp4_video_decoder_open(cin, cencoder, cdevice, cBool(opts.HardwareDecode))
+	if ptr == nil {
+		return nil, fmt.Errorf("open fMP4 video decoder failed: %s", lastFFErr())
+	}
+	return &FMP4VideoDecoder{ptr: ptr}, nil
+}
+
+func (d *FMP4VideoDecoder) Close() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.ptr != nil {
+		C.tc_fmp4_video_decoder_close(d.ptr)
+		d.ptr = nil
+	}
+}
+
+func (d *FMP4VideoDecoder) Transcode(ctx context.Context, output string, opts TranscodeOptions) error {
+	if d == nil {
+		return fmt.Errorf("fMP4 video decoder is nil")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.ptr == nil {
+		return fmt.Errorf("fMP4 video decoder is closed")
+	}
+	cout := C.CString(output)
+	cpreset := C.CString(PresetForEncoder(opts.EncoderName, opts.Preset))
+	cencoder := C.CString(opts.EncoderName)
+	cdevice := C.CString(opts.HardwareDevice)
+	caudioCodec := C.CString(opts.AudioCodec)
+	defer C.free(unsafe.Pointer(cout))
+	defer C.free(unsafe.Pointer(cpreset))
+	defer C.free(unsafe.Pointer(cencoder))
+	defer C.free(unsafe.Pointer(cdevice))
+	defer C.free(unsafe.Pointer(caudioCodec))
+	copts := C.TCTranscodeOptions{
+		target_width: C.int(opts.Width), crop_width: C.int(opts.CropWidth), crop_height: C.int(opts.CropHeight), crop_x: C.int(opts.CropX), crop_y: C.int(opts.CropY),
+		target_fps: C.double(opts.FPS), crf: C.int(opts.CRF), gop_size: C.int(opts.GOPSize), max_b_frames: C.int(opts.MaxBFrames), preset: cpreset,
+		encoder_name: cencoder, hardware_device: cdevice, hardware_decode: cBool(opts.HardwareDecode), audio_mode: cAudioMode(opts.AudioMode), audio_stream: C.int(opts.AudioStream),
+		audio_bitrate: C.int(opts.AudioBitrate), audio_channels: C.int(opts.AudioChannels), audio_codec: caudioCodec, start_time: C.double(opts.StartTime), duration: C.double(opts.Duration), timestamp_offset: C.double(opts.TimestampOffset),
+	}
+	rc := withCancelFlag(ctx, func(flag *C.int) C.int {
+		copts.cancel_flag = (*C.int)(unsafe.Pointer(flag))
+		return C.tc_fmp4_video_decoder_transcode(d.ptr, cout, &copts)
+	})
+	if rc < 0 {
+		return fmt.Errorf("transcode fMP4 segment failed: %s", lastFFErr())
+	}
+	return nil
 }
 
 type CodecDescriptor struct {

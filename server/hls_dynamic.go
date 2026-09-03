@@ -64,6 +64,57 @@ type DynamicHLSSession struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	codecMu         sync.Mutex
+	prewarmMu       sync.Mutex
+	decoderMu       sync.Mutex
+	videoDecoder    *transcoder.FMP4VideoDecoder
+	decoderTimer    *time.Timer
+}
+
+func (sess *DynamicHLSSession) getVideoDecoder(opts transcoder.TranscodeOptions) (*transcoder.FMP4VideoDecoder, error) {
+	sess.decoderMu.Lock()
+	defer sess.decoderMu.Unlock()
+	if sess.decoderTimer != nil {
+		sess.decoderTimer.Stop()
+		sess.decoderTimer = nil
+	}
+	if sess.videoDecoder == nil {
+		dec, err := transcoder.NewFMP4VideoDecoder(sess.InputPath, opts)
+		if err != nil {
+			return nil, err
+		}
+		sess.videoDecoder = dec
+	}
+	return sess.videoDecoder, nil
+}
+
+func (sess *DynamicHLSSession) scheduleVideoDecoderClose() {
+	sess.decoderMu.Lock()
+	defer sess.decoderMu.Unlock()
+	if sess.decoderTimer != nil {
+		sess.decoderTimer.Stop()
+	}
+	sess.decoderTimer = time.AfterFunc(15*time.Second, func() {
+		sess.decoderMu.Lock()
+		defer sess.decoderMu.Unlock()
+		if sess.videoDecoder != nil {
+			sess.videoDecoder.Close()
+			sess.videoDecoder = nil
+		}
+		sess.decoderTimer = nil
+	})
+}
+
+func (sess *DynamicHLSSession) closeVideoDecoder() {
+	sess.decoderMu.Lock()
+	defer sess.decoderMu.Unlock()
+	if sess.decoderTimer != nil {
+		sess.decoderTimer.Stop()
+		sess.decoderTimer = nil
+	}
+	if sess.videoDecoder != nil {
+		sess.videoDecoder.Close()
+		sess.videoDecoder = nil
+	}
 }
 
 type DynamicHLSManager struct {
@@ -341,6 +392,7 @@ func (s *Server) deleteDynamicHLSSession(_ context.Context, w http.ResponseWrite
 	if sess.cancel != nil {
 		sess.cancel()
 	}
+	sess.closeVideoDecoder()
 	if sess.InputCleanup != nil {
 		s.sessionMu.Lock()
 		s.retiredInputs = append(s.retiredInputs, sess.InputCleanup)
@@ -641,12 +693,12 @@ func (s *Server) dynamicHLSVariantSegment(ctx context.Context, w http.ResponseWr
 		return
 	}
 	path := hlsSegmentPath(sess, variant, idx)
-	s.prewarmHLS(sess, variant, idx+1, sess.PrewarmSegments)
 	if err := s.ensureDynamicVariantSegment(ctx, sess, variant, idx, path); err != nil {
 		s.logger.Warn("hls segment failed", "id", id, "variant", variant.Name, "index", idx, "err", err)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.prewarmHLS(sess, variant, idx+1, sess.PrewarmSegments)
 	w.Header().Set("Content-Type", hlsSegmentContentType(variant))
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	http.ServeFile(w, r, path)
@@ -656,29 +708,33 @@ func (s *Server) prewarmHLS(sess *DynamicHLSSession, variant DynamicHLSVariant, 
 	if sess == nil || count <= 0 || sess.ctx == nil || sess.ctx.Err() != nil {
 		return
 	}
-	segDur := variant.Options.SegmentSeconds
-	if segDur <= 0 {
-		segDur = 4
+	if !sess.prewarmMu.TryLock() {
+		return
 	}
-	maxCount := int(math.Ceil(sess.Info.Duration / segDur))
-	for n := 0; n < count; n++ {
-		idx := startIdx + n
-		if idx < 0 || idx >= maxCount {
-			continue
+	if !s.dynHLS.beginBackground() {
+		sess.prewarmMu.Unlock()
+		return
+	}
+	go func() {
+		defer s.dynHLS.endBackground()
+		defer sess.prewarmMu.Unlock()
+
+		segDur := variant.Options.SegmentSeconds
+		if segDur <= 0 {
+			segDur = 4
 		}
-		path := hlsSegmentPath(sess, variant, idx)
-		if !s.dynHLS.beginBackground() {
-			return
-		}
-		go func(i int, p string) {
-			defer s.dynHLS.endBackground()
-			if err := s.ensureDynamicVariantSegment(sess.ctx, sess, variant, i, p); err != nil {
-				if sess.ctx.Err() == nil {
-					s.logger.Debug("hls prewarm failed", "id", sess.ID, "variant", variant.Name, "index", i, "err", err)
-				}
+		maxCount := int(math.Ceil(sess.Info.Duration / segDur))
+		for n := 0; n < count; n++ {
+			idx := startIdx + n
+			if idx < 0 || idx >= maxCount || sess.ctx.Err() != nil {
+				continue
 			}
-		}(idx, path)
-	}
+			path := hlsSegmentPath(sess, variant, idx)
+			if err := s.ensureDynamicVariantSegment(sess.ctx, sess, variant, idx, path); err != nil && sess.ctx.Err() == nil {
+				s.logger.Debug("hls prewarm failed", "id", sess.ID, "variant", variant.Name, "index", idx, "err", err)
+			}
+		}
+	}()
 }
 
 func (s *Server) ensureDynamicSegment(ctx context.Context, sess *DynamicHLSSession, idx int, path string) error {
@@ -747,11 +803,28 @@ func (s *Server) ensureDynamicVariantSegment(ctx context.Context, sess *DynamicH
 	if hlsUsesFMP4(variant) {
 		fullTmp := tmp + ".full.mp4"
 		_ = os.Remove(fullTmp)
-		if _, err := transcoder.TranscodeFMP4SegmentFromFile(genCtx, sess.InputPath, fullTmp, opts); err != nil {
+		var transcodeErr error
+		if opts.HardwareDecode {
+			dec, err := sess.getVideoDecoder(opts)
+			if err != nil {
+				transcodeErr = err
+			} else {
+				transcodeErr = dec.Transcode(genCtx, fullTmp, opts)
+				if transcodeErr == nil {
+					sess.scheduleVideoDecoderClose()
+				}
+			}
+		} else {
+			_, transcodeErr = transcoder.TranscodeFMP4SegmentFromFile(genCtx, sess.InputPath, fullTmp, opts)
+		}
+		if transcodeErr != nil {
+			if opts.HardwareDecode {
+				sess.closeVideoDecoder()
+			}
 			s.metrics.segmentErrors.Add(1)
 			_ = os.Remove(fullTmp)
 			_ = os.Remove(tmp)
-			return err
+			return transcodeErr
 		}
 		if err := splitHLSFMP4(fullTmp, hlsInitPath(sess, variant), tmp); err != nil {
 			s.metrics.segmentErrors.Add(1)

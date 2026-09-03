@@ -509,6 +509,7 @@ func (s *Server) ensureLibraryHLSSession(ctx context.Context, profileID, library
 		if stale.cancel != nil {
 			stale.cancel()
 		}
+		stale.closeVideoDecoder()
 		if stale.InputCleanup != nil {
 			s.retiredInputs = append(s.retiredInputs, stale.InputCleanup)
 		}

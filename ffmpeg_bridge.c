@@ -267,9 +267,9 @@ typedef struct TCDecoder {
     AVFrame *frame;
     AVFrame *audio_frame;
     AVBufferRef *hw_device_ctx;
-    AVBufferRef *hw_frames_ctx;
     enum AVPixelFormat hw_pix_fmt;
     int hardware_decode;
+    int persistent;
     TCAVIOInput *custom_input;
 } TCDecoder;
 
@@ -410,11 +410,11 @@ int tc_probe_codec(const char *input_path, int media_type, TCCodecInfo *info) {
 
 static void decoder_close(TCDecoder *d) {
     if (!d) return;
+    if (d->persistent) return;
     if (d->frame) av_frame_free(&d->frame);
     if (d->audio_frame) av_frame_free(&d->audio_frame);
     if (d->pkt) av_packet_free(&d->pkt);
     if (d->adec) avcodec_free_context(&d->adec);
-    av_buffer_unref(&d->hw_frames_ctx);
     if (d->dec) avcodec_free_context(&d->dec);
     tc_hw_device_release(d->hw_device_ctx);
     av_buffer_unref(&d->hw_device_ctx);
@@ -422,15 +422,38 @@ static void decoder_close(TCDecoder *d) {
     free(d);
 }
 
+static void decoder_destroy(TCDecoder *d) {
+    if (!d) return;
+    d->persistent = 0;
+    decoder_close(d);
+}
+
 static enum AVPixelFormat hardware_get_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
     TCDecoder *d = (TCDecoder *)ctx->opaque;
     if (!d) return AV_PIX_FMT_NONE;
     for (const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-        if (*p == d->hw_pix_fmt) return *p;
+        if (*p != d->hw_pix_fmt) continue;
+        if (!ctx->hw_frames_ctx) {
+            AVBufferRef *frames = NULL;
+            int ret = avcodec_get_hw_frames_parameters(ctx, d->hw_device_ctx, *p, &frames);
+            if (ret < 0) {
+                set_av_error("avcodec_get_hw_frames_parameters", ret);
+                return AV_PIX_FMT_NONE;
+            }
+            ret = av_hwframe_ctx_init(frames);
+            if (ret < 0) {
+                set_av_error("av_hwframe_ctx_init hardware decode", ret);
+                av_buffer_unref(&frames);
+                return AV_PIX_FMT_NONE;
+            }
+            ctx->hw_frames_ctx = frames;
+        }
+        return *p;
     }
     set_error("decoder does not expose requested hardware pixel format %s", av_get_pix_fmt_name(d->hw_pix_fmt));
     return AV_PIX_FMT_NONE;
 }
+
 
 
 static int decoder_supports_hw(const AVCodec *codec, enum AVHWDeviceType device_type, enum AVPixelFormat pix_fmt) {
@@ -495,18 +518,9 @@ static TCDecoder *decoder_open(const char *input_path, const char *encoder_name,
         const char *device = hardware_device && hardware_device[0] ? hardware_device : (device_type == AV_HWDEVICE_TYPE_CUDA ? "0" : "/dev/dri/renderD128");
         d->hw_device_ctx = tc_hw_device_ref(device_type, device);
         if (!d->hw_device_ctx) { decoder_close(d); return NULL; }
-        ret = avcodec_get_hw_frames_parameters(d->dec, d->hw_device_ctx, hw_pix_fmt, &d->hw_frames_ctx);
-        if (ret < 0 || !d->hw_frames_ctx) {
-            set_av_error("avcodec_get_hw_frames_parameters hardware decode", ret);
-            decoder_close(d);
-            return NULL;
-        }
-        ret = av_hwframe_ctx_init(d->hw_frames_ctx);
-        if (ret < 0) { set_av_error("av_hwframe_ctx_init hardware decode", ret); decoder_close(d); return NULL; }
         d->dec->opaque = d;
         d->dec->get_format = hardware_get_format;
         d->dec->hw_device_ctx = av_buffer_ref(d->hw_device_ctx);
-        d->dec->hw_frames_ctx = av_buffer_ref(d->hw_frames_ctx);
         d->hw_pix_fmt = hw_pix_fmt;
         d->hardware_decode = 1;
     }
@@ -528,6 +542,53 @@ static TCDecoder *decoder_open(const char *input_path, const char *encoder_name,
     d->audio_frame = av_frame_alloc();
     if (!d->pkt || !d->frame || !d->audio_frame) { set_error("packet/frame alloc failed"); decoder_close(d); return NULL; }
     return d;
+}
+
+
+static int decoder_prepare_hw_frames(TCDecoder *d, int64_t seek_ts) {
+    if (!d || !d->hardware_decode || d->dec->hw_frames_ctx) return 0;
+
+    int ret = 0;
+    int got_frame = 0;
+    while ((ret = av_read_frame(d->fmt, d->pkt)) >= 0) {
+        if (d->pkt->stream_index != d->stream_index) {
+            av_packet_unref(d->pkt);
+            continue;
+        }
+        ret = avcodec_send_packet(d->dec, d->pkt);
+        av_packet_unref(d->pkt);
+        if (ret < 0 && ret != AVERROR(EAGAIN)) {
+            set_av_error("hardware prime avcodec_send_packet", ret);
+            return ret;
+        }
+        while ((ret = avcodec_receive_frame(d->dec, d->frame)) >= 0) {
+            av_frame_unref(d->frame);
+            if (!d->dec->hw_frames_ctx) {
+                set_error("hardware decoder did not initialize hardware frames context");
+                return AVERROR(EINVAL);
+            }
+            got_frame = 1;
+            break;
+        }
+        if (got_frame) break;
+        if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
+            set_av_error("hardware prime avcodec_receive_frame", ret);
+            return ret;
+        }
+    }
+    if (!got_frame) {
+        if (ret < 0 && ret != AVERROR_EOF) set_av_error("hardware prime av_read_frame", ret);
+        else set_error("hardware decoder did not produce a frame");
+        return ret < 0 && ret != AVERROR_EOF ? ret : AVERROR(EINVAL);
+    }
+
+    ret = avformat_seek_file(d->fmt, d->stream_index, INT64_MIN, seek_ts, seek_ts, AVSEEK_FLAG_BACKWARD);
+    if (ret < 0) {
+        set_av_error("hardware prime avformat_seek_file", ret);
+        return ret;
+    }
+    avcodec_flush_buffers(d->dec);
+    return 0;
 }
 
 static const AVCodec *choose_video_encoder(const char *encoder_name, enum AVCodecID *codec_id) {
@@ -929,11 +990,17 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     double end_time = duration_limit > 0.0 ? start_time + duration_limit : 0.0;
     double timestamp_offset = (opts && opts->timestamp_offset > 0.0) ? opts->timestamp_offset : 0.0;
 
-    if (start_time > 0.0) {
-        int64_t seek_ts = av_rescale_q((int64_t)llround(start_time * (double)AV_TIME_BASE), AV_TIME_BASE_Q, dec->stream->time_base);
+    int64_t seek_ts = 0;
+    if (start_time > 0.0 || dec->persistent) {
+        seek_ts = av_rescale_q((int64_t)llround(start_time * (double)AV_TIME_BASE), AV_TIME_BASE_Q, dec->stream->time_base);
         int ret_seek = avformat_seek_file(dec->fmt, dec->stream_index, INT64_MIN, seek_ts, seek_ts, AVSEEK_FLAG_BACKWARD);
         if (ret_seek < 0) { set_av_error("avformat_seek_file", ret_seek); decoder_close(dec); return ret_seek; }
         avcodec_flush_buffers(dec->dec);
+        if (dec->adec) avcodec_flush_buffers(dec->adec);
+    }
+    if (zero_copy_vaapi || zero_copy_cuda) {
+        int ret_prepare = decoder_prepare_hw_frames(dec, seek_ts);
+        if (ret_prepare < 0) { decoder_close(dec); return ret_prepare; }
     }
 
     double fps_d = target_fps > 1.0 && target_fps <= 120.0 ? target_fps : stream_fps(dec->stream);
@@ -951,7 +1018,7 @@ static int transcode_decoder_to_video_opts(TCDecoder *dec, const char *output_pa
     int hardware_filter = zero_copy_vaapi || zero_copy_cuda;
     enum AVPixelFormat filter_pix_fmt = hardware_filter ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
     AVBufferRef *filter_device_ctx = hardware_filter ? dec->hw_device_ctx : NULL;
-    AVBufferRef *filter_frames_ctx = hardware_filter ? dec->hw_frames_ctx : NULL;
+    AVBufferRef *filter_frames_ctx = hardware_filter ? dec->dec->hw_frames_ctx : NULL;
     int ret = init_video_filter(dec, target_width, opts ? opts->crop_width : 0, opts ? opts->crop_height : 0, opts ? opts->crop_x : 0, opts ? opts->crop_y : 0, fps, filter_pix_fmt, zero_copy_vaapi, zero_copy_cuda, filter_device_ctx, filter_frames_ctx, &filter_graph, &src_ctx, &sink_ctx, &out_w, &out_h, &sink_tb);
     if (ret < 0) { decoder_close(dec); return ret; }
     if (out_w <= 0 || out_h <= 0) { set_error("invalid filter output size %dx%d", out_w, out_h); avfilter_graph_free(&filter_graph); decoder_close(dec); return AVERROR(EINVAL); }
@@ -1351,6 +1418,29 @@ int tc_transcode_fmp4_segment_video(const char *input_path, const char *output_p
     TCDecoder *dec = decoder_open(input_path, local.encoder_name, local.hardware_device, local.hardware_decode);
     if (!dec) return AVERROR(EINVAL);
     return transcode_decoder_to_video_opts(dec, output_path, &local);
+}
+
+void *tc_fmp4_video_decoder_open(const char *input_path, const char *encoder_name, const char *hardware_device, int hardware_decode) {
+    if (!input_path) { set_error("tc_fmp4_video_decoder_open: nil path"); return NULL; }
+    TCDecoder *dec = decoder_open(input_path, encoder_name, hardware_device, hardware_decode);
+    if (!dec) return NULL;
+    dec->persistent = 1;
+    return dec;
+}
+
+int tc_fmp4_video_decoder_transcode(void *decoder, const char *output_path, const TCTranscodeOptions *opts) {
+    TCDecoder *dec = (TCDecoder *)decoder;
+    if (!dec || !output_path) { set_error("tc_fmp4_video_decoder_transcode: nil input"); return AVERROR(EINVAL); }
+    TCTranscodeOptions local;
+    memset(&local, 0, sizeof(local));
+    if (opts) local = *opts;
+    local.format = "mp4";
+    local.faststart = 0;
+    return transcode_decoder_to_video_opts(dec, output_path, &local);
+}
+
+void tc_fmp4_video_decoder_close(void *decoder) {
+    decoder_destroy((TCDecoder *)decoder);
 }
 
 int tc_encoder_available(const char *encoder_name) {

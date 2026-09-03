@@ -115,6 +115,7 @@ func (s *Server) Close() {
 	s.dynHLS.Wait()
 	s.dynDASH.Wait()
 	for _, sess := range hlsSessions {
+		sess.closeVideoDecoder()
 		if sess.InputCleanup != nil {
 			sess.InputCleanup()
 		}

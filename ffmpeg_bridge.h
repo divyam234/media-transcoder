@@ -61,6 +61,9 @@ int tc_transcode_hls_video(const char *input_path, const char *playlist_path, co
 int tc_transcode_segment_video(const char *input_path, const char *output_path, const TCTranscodeOptions *opts);
 int tc_transcode_fmp4_segment_video(const char *input_path, const char *output_path, const TCTranscodeOptions *opts);
 int tc_transcode_fmp4_segment_audio(const char *input_path, const char *output_path, const TCTranscodeOptions *opts);
+void *tc_fmp4_video_decoder_open(const char *input_path, const char *encoder_name, const char *hardware_device, int hardware_decode);
+int tc_fmp4_video_decoder_transcode(void *decoder, const char *output_path, const TCTranscodeOptions *opts);
+void tc_fmp4_video_decoder_close(void *decoder);
 int tc_encoder_available(const char *encoder_name);
 int tc_transcode_dash_video(const char *input_path, const char *mpd_path, const TCTranscodeOptions *opts);
 volatile int *tc_cancel_alloc(void);
